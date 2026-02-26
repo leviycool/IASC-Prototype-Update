@@ -10,6 +10,9 @@ __pycache__/
 # Generated database (regenerate with: python data/generate_mock_data.py)
 data/donors.db
 
+# Persistent usage log (local only; contains per-session token counts)
+data/usage.db
+
 # macOS
 .DS_Store
 

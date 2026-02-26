@@ -43,6 +43,10 @@ if "selected_model" not in st.session_state:
 if "pending_question" not in st.session_state:
     st.session_state.pending_question = None
 
+if "session_id" not in st.session_state:
+    import uuid
+    st.session_state.session_id = str(uuid.uuid4())[:8]
+
 # ─── Sidebar ─────────────────────────────────────────────────────────────────
 
 with st.sidebar:
@@ -196,6 +200,7 @@ if user_input:
                     model=st.session_state.selected_model,
                     session_tracker=st.session_state.tracker,
                     progress_callback=lambda msg: status.update(label=msg),
+                    st_session_id=st.session_state.session_id,
                 )
                 status.update(label="Done", state="complete", expanded=False)
             except Exception as e:

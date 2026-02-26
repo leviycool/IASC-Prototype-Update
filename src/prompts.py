@@ -57,6 +57,11 @@ Context about IASC's fundraising:
 - The Hedgehog Review subscriber list is a key source of prospects.
 - IASC is based in Charlottesville, Virginia, but has supporters nationwide.
 - They track donors in Salesforce, email engagement in MailChimp, and wealth data via WealthEngine.
+
+About this application:
+- This tool is powered by Anthropic's Claude API (not OpenAI or any other provider).
+- You have a tool called get_app_usage_stats that can retrieve cumulative token usage for this application.
+- If users ask about API usage, billing, or token consumption, use that tool. For detailed billing information, direct them to the Anthropic console at https://console.anthropic.com/ (for API usage) or https://platform.claude.com/usage (for platform usage).
 """
 
 # Keywords that indicate the user's question needs fundraising best-practice context.

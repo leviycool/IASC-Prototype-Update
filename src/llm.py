@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from config import DEFAULT_MODEL, MAX_TOOL_CALLS_PER_TURN
 from prompts import build_system_prompt, needs_knowledge_base
 from token_tracker import APICall, ResponseUsage, SessionTracker
+from usage_store import log_api_call, get_usage_summary
 import queries
 
 # ─── Tool definitions ────────────────────────────────────────────────────────
@@ -121,9 +122,27 @@ TOOLS = [
         }
     },
     {
+        "name": "get_app_usage_stats",
+        "description": "Get cumulative token usage and cost statistics for this application. Use this when the user asks about API usage, token consumption, costs, or billing. Can filter by date range or model.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "since": {
+                    "type": "string",
+                    "description": "ISO date (YYYY-MM-DD) to filter usage from. Omit for all-time stats."
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Filter to a specific model name. Omit for all models."
+                },
+            },
+            "required": []
+        }
+    },
+    {
         "name": "plan_fundraising_trip",
         "description": "Find the best contacts to meet during a fundraising trip to a specific area. Ranks by composite score: giving history, wealth, engagement, recency, subscription. Use for trip planning questions.",
-        "cache_control": {"type": "ephemeral"},  # caches all 7 tool definitions
+        "cache_control": {"type": "ephemeral"},  # caches all 8 tool definitions
         "input_schema": {
             "type": "object",
             "properties": {
@@ -150,6 +169,7 @@ TOOL_FUNCTIONS = {
     "get_lapsed_donors": queries.get_lapsed_donors,
     "get_prospects_by_potential": queries.get_prospects_by_potential,
     "plan_fundraising_trip": queries.plan_fundraising_trip,
+    "get_app_usage_stats": lambda **kwargs: get_usage_summary(**kwargs),
 }
 
 
@@ -197,6 +217,7 @@ def get_response(
     model: str = DEFAULT_MODEL,
     session_tracker: Optional[SessionTracker] = None,
     progress_callback: Optional[Callable[[str], None]] = None,
+    st_session_id: Optional[str] = None,
 ) -> tuple[str, ResponseUsage]:
     """Send a user message through the full tool-use conversation loop.
 
@@ -281,6 +302,20 @@ def get_response(
             cache_read_input_tokens=getattr(response.usage, "cache_read_input_tokens", 0) or 0,
         )
         response_usage.calls.append(api_call)
+
+        # Persist to the cross-session usage log
+        log_api_call(
+            timestamp=api_call.timestamp,
+            model=api_call.model,
+            input_tokens=api_call.input_tokens,
+            output_tokens=api_call.output_tokens,
+            cache_creation_input_tokens=api_call.cache_creation_input_tokens,
+            cache_read_input_tokens=api_call.cache_read_input_tokens,
+            had_tool_use=api_call.had_tool_use,
+            latency_ms=api_call.latency_ms,
+            question=user_message,
+            session_id=st_session_id,
+        )
 
         # If Claude is done (no tool use), return the text response
         if response.stop_reason == "end_turn" or not had_tool_use:
