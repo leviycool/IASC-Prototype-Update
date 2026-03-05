@@ -1,0 +1,18 @@
+{
+  "name": "IASC Donor Tool",
+  "image": "mcr.microsoft.com/devcontainers/python:3.11",
+  "postCreateCommand": "pip install -r requirements.txt && python data/generate_mock_data.py",
+  "forwardPorts": [8501],
+  "portsAttributes": {
+    "8501": {
+      "label": "Streamlit app",
+      "onAutoForward": "notify"
+    }
+  },
+  "secrets": {
+    "ANTHROPIC_API_KEY": {
+      "description": "Your Anthropic API key (sk-ant-...). Set this under GitHub Settings > Codespaces > Secrets.",
+      "documentationUrl": "https://console.anthropic.com/settings/keys"
+    }
+  }
+}

@@ -28,6 +28,31 @@ The app will open in your browser at `http://localhost:8501`.
 
 ---
 
+## Running in GitHub Codespaces (no local setup required)
+
+1. Click the green **Code** button on the repo page, then **Codespaces > New codespace**.
+2. Wait for the environment to build (about 2 minutes the first time).
+3. Add your Anthropic API key as a Codespaces secret: go to github.com > Settings > Codespaces > Secrets,
+   create a secret named `ANTHROPIC_API_KEY`, and set its value to your key. Grant it access to this repo.
+4. In the Codespace terminal, run: `streamlit run src/app.py`
+5. When prompted, click **Open in Browser** to view the app.
+
+The mock database is generated automatically during environment setup.
+You do not need to run `generate_mock_data.py` manually.
+
+## Deploying to Streamlit Community Cloud
+
+1. Fork this repo to your own GitHub account.
+2. Go to share.streamlit.io and connect your GitHub account.
+3. Create a new app, pointing to `src/app.py` in your fork.
+4. Under **Advanced settings > Secrets**, paste the contents of `.streamlit/secrets.toml.example`
+   and replace the placeholder with your real API key.
+5. Click **Deploy**. The mock database will be generated automatically on first startup.
+
+Note: do not use real donor data with this deployment. The app has no authentication.
+
+---
+
 ## Using the app
 
 **Chat interface:** Type any question about donors in the chat box at the bottom of the page. Claude will call one or more data query functions, synthesize the results, and display a response with specific names, amounts, and dates from the database.

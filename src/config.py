@@ -15,7 +15,11 @@ KNOWLEDGE_DIR = PROJECT_ROOT / "knowledge"
 DB_PATH = DATA_DIR / "donors.db"
 
 # API configuration
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+try:
+    import streamlit as st
+    ANTHROPIC_API_KEY = st.secrets.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+except Exception:
+    ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 
 # Model configuration
 DEFAULT_MODEL = "claude-sonnet-4-20250514"

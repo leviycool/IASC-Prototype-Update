@@ -16,6 +16,9 @@ data/usage.db
 # macOS
 .DS_Store
 
+# Streamlit secrets (never commit real keys)
+.streamlit/secrets.toml
+
 # IDE
 .vscode/
 .idea/
