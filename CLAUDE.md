@@ -24,7 +24,7 @@ This tool lets them ask natural language questions about their donor data and re
 User question (Streamlit chat)
         |
         v
-Claude API (Sonnet) with tool use
+Claude API (Haiku by default; switchable to Sonnet in UI) with tool use
         |                    \
         v                     v
 Python functions that     Knowledge base
@@ -56,7 +56,7 @@ Key design decisions:
 
 - Python 3.11+
 - Streamlit (UI)
-- Anthropic SDK (LLM; Claude Sonnet)
+- Anthropic SDK (LLM; Claude Haiku by default, Sonnet available)
 - SQLite (data storage)
 - pandas (data manipulation and querying)
 - plotly (optional charts)
@@ -85,6 +85,7 @@ iasc-donor-tool/
 │   ├── knowledge.py           # Knowledge base loader and formatter
 │   ├── prompts.py             # System prompts and prompt templates
 │   ├── token_tracker.py       # Token usage tracking and cost estimation
+│   ├── usage_store.py         # Persistent SQLite log of all API calls across sessions
 │   └── config.py              # Configuration and constants
 ├── tests/
 │   ├── test_queries.py        # Unit tests for query functions
@@ -111,7 +112,7 @@ The mock dataset expands this to 300 records with additional fields we expect fr
 
 ## Important constraints
 
-- API budget is limited (roughly $500 for the semester across all students). Use Claude Sonnet (claude-sonnet-4-20250514) by default; avoid Opus unless testing capability differences.
+- API budget is limited (roughly $70 for the semester). Default model is **Haiku** (`claude-haiku-4-5-20251001`) for cost efficiency; switch to Sonnet (`claude-sonnet-4-20250514`) in the UI for more complex queries. Avoid Opus unless testing capability differences.
 - All donor data is synthetic / anonymized. Never store or display real donor PII.
 - The tool should work offline with mock data; real data integration comes later.
 - Keep dependencies minimal; students need to understand and modify this code.
@@ -119,6 +120,8 @@ The mock dataset expands this to 300 records with additional fields we expect fr
 
 ## Common tasks
 
+- **Initial setup**: `pip install -r requirements.txt && cp .env.example .env`
+  - Then add your `ANTHROPIC_API_KEY` to `.env`
 - **Run the app**: `streamlit run src/app.py`
 - **Regenerate mock data**: `python data/generate_mock_data.py`
 - **Run tests**: `pytest tests/`
