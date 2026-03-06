@@ -51,6 +51,8 @@ You do not need to run `generate_mock_data.py` manually.
 
 Note: do not use real donor data with this deployment. The app has no authentication.
 
+**To rotate the API key after initial deployment:** go to https://share.streamlit.io, find the app, click the three-dot menu (⋮) on the right > **Settings** > **Secrets**, and update the value to the new key in the format `ANTHROPIC_API_KEY = "sk-ant-..."`  . The app will restart automatically.
+
 ---
 
 ## Using the app
