@@ -234,3 +234,7 @@ if user_input:
         "content": response_text,
         "usage": response_usage,
     })
+
+    # Rerun so the sidebar session-usage section (rendered earlier in the
+    # script) picks up the tracker update from this response immediately.
+    st.rerun()
