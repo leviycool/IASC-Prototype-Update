@@ -351,6 +351,34 @@ def generate_contact_id() -> str:
     return f"003XX00000{suffix}"
 
 
+def round_to_nice_amount(amount: float) -> float:
+    """
+    Snap a raw dollar amount to a psychologically realistic gift value.
+
+    Real donors write round-number checks: $25, $50, $100, $500, $1,000.
+    The rounding granularity scales with the gift size so that small gifts
+    land on $5 increments and large gifts on $1,000 increments.
+    """
+    if amount < 50:
+        # Round to nearest $5 (e.g. $20, $25, $30, $35 ...)
+        return max(20.0, round(amount / 5) * 5)
+    elif amount < 250:
+        # Round to nearest $25 (e.g. $50, $75, $100, $125 ...)
+        return round(amount / 25) * 25
+    elif amount < 1_000:
+        # Round to nearest $50 (e.g. $250, $300, $350 ...)
+        return round(amount / 50) * 50
+    elif amount < 10_000:
+        # Round to nearest $100 (e.g. $1,000, $1,100, $2,500 ...)
+        return round(amount / 100) * 100
+    elif amount < 100_000:
+        # Round to nearest $1,000 (e.g. $10,000, $15,000 ...)
+        return round(amount / 1_000) * 1_000
+    else:
+        # Round to nearest $5,000 (e.g. $100,000, $250,000 ...)
+        return round(amount / 5_000) * 5_000
+
+
 def power_law_total_gifts_v2() -> float:
     """
     Gift distribution calibrated for a small nonprofit.
@@ -359,7 +387,8 @@ def power_law_total_gifts_v2() -> float:
     - ~25 significant donors ($10K-$100K)
     - ~100 mid-level donors ($1K-$10K)
     - ~400 small donors ($100-$1K)
-    - remaining ~$1-$100 token donors
+    - remaining small donors ($20-$100)
+    Minimum gift is $20; all totals are snapped to round numbers.
     """
     r = random.random()
     if r < 0.006:
@@ -371,9 +400,9 @@ def power_law_total_gifts_v2() -> float:
     elif r < 0.216:
         lo, hi = 100, 1_000
     else:
-        lo, hi = 1, 100
+        lo, hi = 20, 100
     log_amount = random.uniform(math.log(lo), math.log(hi))
-    return round(math.exp(log_amount), 2)
+    return round_to_nice_amount(math.exp(log_amount))
 
 
 def n_gifts_for_total(total: float) -> int:
@@ -900,18 +929,20 @@ def generate_gifts(contacts: list[dict]) -> list[dict]:
         cid        = contact["contact_id"]
 
         # Generate n amounts that sum to total.
-        # Strategy: draw (n-1) random amounts proportionally, assign remainder to last.
+        # Strategy: draw raw proportional amounts from a log-normal, then snap each
+        # to a psychologically realistic round number (donors write round checks).
         if n == 1:
-            amounts = [round(total, 2)]
+            amounts = [round_to_nice_amount(total)]
         else:
-            # Draw from log-normal centered at avg; then rescale to hit total exactly.
-            raw = [max(1.0, random.lognormvariate(math.log(max(avg, 1)), 0.6))
+            # Draw from log-normal centered at avg; rescale to stay near total.
+            raw = [max(20.0, random.lognormvariate(math.log(max(avg, 20)), 0.6))
                    for _ in range(n)]
             raw_sum = sum(raw)
-            amounts = [round(total * v / raw_sum, 2) for v in raw]
-            # Fix rounding drift on last element
-            amounts[-1] = round(total - sum(amounts[:-1]), 2)
-            amounts[-1] = max(1.0, amounts[-1])
+            # Snap each amount to a nice value; accept that the sum won't be
+            # exact — this is realistic (each gift is an independent transaction).
+            amounts = [round_to_nice_amount(total * v / raw_sum) for v in raw]
+            # Ensure no individual gift drops below the minimum.
+            amounts = [max(20.0, a) for a in amounts]
 
         # Distribute dates between first_gift_date and last_gift_date,
         # biased toward year-end giving season.
@@ -928,7 +959,7 @@ def generate_gifts(contacts: list[dict]) -> list[dict]:
                 "gift_id":    gift_id,
                 "contact_id": cid,
                 "gift_date":  gdate.isoformat(),
-                "amount":     max(1.0, round(amount, 2)),
+                "amount":     amount,
                 "gift_type":  gift_type,
                 "campaign":   campaign,
             })
