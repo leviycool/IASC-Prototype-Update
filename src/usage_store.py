@@ -148,20 +148,24 @@ def get_usage_summary(
 
     total_cost = 0.0
     for mr in result["by_model"]:
-        pricing = MODEL_PRICING.get(mr["model"], MODEL_PRICING.get("claude-sonnet-4-20250514", {}))
-        base_rate = pricing.get("input_per_mtok", 3.0)
-        output_rate = pricing.get("output_per_mtok", 15.0)
+        pricing = MODEL_PRICING.get(mr["model"])
+        if not pricing:
+            continue
+        base_rate = pricing["input_per_mtok"]
+        output_rate = pricing["output_per_mtok"]
 
         cache_read = mr.get("cache_read_tokens", 0) or 0
-        regular_input = (mr.get("input_tokens", 0) or 0) - cache_read
+        cache_write = mr.get("cache_creation_input_tokens", 0) or 0
+        regular_input = (mr.get("input_tokens", 0) or 0) - cache_read - cache_write
         total_cost += (regular_input / 1_000_000) * base_rate
+        total_cost += (cache_write / 1_000_000) * base_rate * 1.25
         total_cost += (cache_read / 1_000_000) * base_rate * 0.1
         total_cost += ((mr.get("output_tokens", 0) or 0) / 1_000_000) * output_rate
 
     result["estimated_total_cost_usd"] = round(total_cost, 4)
     result["note"] = (
         "These are estimates based on list pricing. For exact billing, "
-        "see https://console.anthropic.com/ or https://platform.claude.com/usage"
+        "see your provider's billing dashboard"
     )
 
     conn.close()

@@ -15,18 +15,71 @@ KNOWLEDGE_DIR = PROJECT_ROOT / "knowledge"
 DB_PATH = DATA_DIR / "donors.db"
 
 # API configuration
-try:
-    import streamlit as st
-    ANTHROPIC_API_KEY = st.secrets.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
-except Exception:
-    ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+def _get_secret(name: str) -> str | None:
+    """Read a secret from Streamlit first, then from the environment."""
+    try:
+        import streamlit as st
+        return st.secrets.get(name) or os.environ.get(name)
+    except Exception:
+        return os.environ.get(name)
 
-# Model configuration
-DEFAULT_MODEL = "claude-haiku-4-5-20251001"
-AVAILABLE_MODELS = {
+
+ANTHROPIC_API_KEY = _get_secret("ANTHROPIC_API_KEY")
+OPENAI_API_KEY = _get_secret("OPENAI_API_KEY")
+
+# Provider / model configuration
+DEFAULT_PROVIDER = os.environ.get("LLM_PROVIDER", "claude")
+DEFAULT_COMPARE_MODE = os.environ.get("LLM_COMPARE_MODE", "single")
+
+CLAUDE_MODELS = {
     "claude-sonnet-4-20250514": "Sonnet (recommended)",
     "claude-haiku-4-5-20251001": "Haiku (faster, cheaper)",
 }
+
+OPENAI_MODELS = {
+    "gpt-4.1": "GPT-4.1 (recommended)",
+    "gpt-4.1-mini": "GPT-4.1 mini (faster, cheaper)",
+}
+
+BACKEND_OPTIONS = {
+    "claude": "Claude",
+    "openai": "OpenAI",
+    "compare": "Compare both",
+}
+
+DEFAULT_CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
+DEFAULT_OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
+
+# Backwards-compatible default used by older callers/tests
+DEFAULT_MODEL = DEFAULT_CLAUDE_MODEL
+AVAILABLE_MODELS = CLAUDE_MODELS
+
+
+def get_models_for_provider(provider: str) -> dict[str, str]:
+    """Return the available models for a provider."""
+    if provider == "openai":
+        return OPENAI_MODELS
+    return CLAUDE_MODELS
+
+
+def get_default_model_for_provider(provider: str) -> str:
+    """Return the default model for a provider."""
+    if provider == "openai":
+        return DEFAULT_OPENAI_MODEL
+    return DEFAULT_CLAUDE_MODEL
+
+
+def get_api_key_for_provider(provider: str) -> str | None:
+    """Return the configured API key for a provider."""
+    if provider == "openai":
+        return OPENAI_API_KEY
+    return ANTHROPIC_API_KEY
+
+
+try:
+    import streamlit as st  # noqa: F401
+except Exception:
+    pass
 
 # Tool use limits
 MAX_TOOL_CALLS_PER_TURN = 5  # prevent infinite loops

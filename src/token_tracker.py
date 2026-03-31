@@ -9,6 +9,7 @@ each response and in the Streamlit sidebar.
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Optional
 
 
 # Pricing as of early 2025; update these if pricing changes.
@@ -24,7 +25,22 @@ MODEL_PRICING = {
         "output_per_mtok": 4.00,
         "display_name": "Haiku",
     },
+    "gpt-4.1": {
+        "input_per_mtok": 2.00,
+        "output_per_mtok": 8.00,
+        "display_name": "GPT-4.1",
+    },
+    "gpt-4.1-mini": {
+        "input_per_mtok": 0.40,
+        "output_per_mtok": 1.60,
+        "display_name": "GPT-4.1 mini",
+    },
 }
+
+
+def get_model_pricing(model: str) -> Optional[dict]:
+    """Look up pricing metadata for a model."""
+    return MODEL_PRICING.get(model)
 
 
 @dataclass
@@ -74,18 +90,19 @@ class ResponseUsage:
     def total_cache_creation_tokens(self) -> int:
         return sum(c.cache_creation_input_tokens for c in self.calls)
 
-    def estimated_cost(self, model: str) -> float:
+    def estimated_cost(self, model: str | None = None) -> float:
         """Estimated cost in dollars, accounting for prompt caching pricing.
 
         Cache writes: 1.25x normal input rate
         Cache reads:  0.10x normal input rate
         Regular input: 1.00x normal input rate
         """
-        pricing = MODEL_PRICING.get(model, MODEL_PRICING["claude-sonnet-4-20250514"])
-        base_rate = pricing["input_per_mtok"]
-
         total_cost = 0.0
         for call in self.calls:
+            pricing = get_model_pricing(call.model or model or "")
+            if pricing is None:
+                continue
+            base_rate = pricing["input_per_mtok"]
             # Regular (non-cached) input tokens
             regular_input = (
                 call.input_tokens
@@ -102,11 +119,18 @@ class ResponseUsage:
 
         return total_cost
 
-    def format_inline(self, model: str) -> str:
+    def format_inline(self, model: str | None = None) -> str:
         """Format for display below a chat response."""
         cost = self.estimated_cost(model)
-        pricing = MODEL_PRICING.get(model, MODEL_PRICING["claude-sonnet-4-20250514"])
-        model_name = pricing["display_name"]
+        models_used = [c.model for c in self.calls if c.model]
+        unique_models = list(dict.fromkeys(models_used))
+        if len(unique_models) == 1:
+            pricing = get_model_pricing(unique_models[0])
+            model_name = pricing["display_name"] if pricing else unique_models[0]
+        elif unique_models:
+            model_name = "Mixed models"
+        else:
+            model_name = model or "Unknown model"
         cache_info = ""
         if self.total_cache_read_tokens > 0:
             cache_info = f" | {self.total_cache_read_tokens:,} cached"
@@ -134,15 +158,7 @@ class SessionTracker:
 
     @property
     def total_cost(self) -> float:
-        if not self.responses:
-            return 0.0
-        # Use the model from the most recent call for pricing
-        last_response = self.responses[-1]
-        if last_response.calls:
-            model = last_response.calls[-1].model
-        else:
-            model = "claude-sonnet-4-20250514"
-        return sum(r.estimated_cost(model) for r in self.responses)
+        return sum(r.estimated_cost() for r in self.responses)
 
     @property
     def total_api_calls(self) -> int:

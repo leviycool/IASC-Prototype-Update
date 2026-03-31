@@ -57,11 +57,6 @@ Context about IASC's fundraising:
 - The Hedgehog Review subscriber list is a key source of prospects.
 - IASC is based in Charlottesville, Virginia, but has supporters nationwide.
 - They track donors in Salesforce, email engagement in MailChimp, and wealth data via WealthEngine.
-
-About this application:
-- This tool is powered by Anthropic's Claude API (not OpenAI or any other provider).
-- You have a tool called get_app_usage_stats that can retrieve cumulative token usage for this application.
-- If users ask about API usage, billing, or token consumption, use that tool. For detailed billing information, direct them to the Anthropic console at https://console.anthropic.com/ (for API usage) or https://platform.claude.com/usage (for platform usage).
 """
 
 # Keywords that indicate the user's question needs fundraising best-practice context.
@@ -89,7 +84,51 @@ def needs_knowledge_base(user_message: str) -> bool:
     return any(kw in msg_lower for kw in KNOWLEDGE_TRIGGER_KEYWORDS)
 
 
-def build_system_prompt(include_knowledge: bool = False) -> list[dict]:
+def _build_provider_note(provider: str) -> str:
+    """Return provider-specific app context for the system prompt."""
+    if provider == "openai":
+        return (
+            "About this application:\n"
+            "- This tool is currently powered by OpenAI's API.\n"
+            "- You have a tool called get_app_usage_stats that can retrieve cumulative token usage for this application.\n"
+            "- If users ask about API usage, billing, or token consumption, use that tool. "
+            "For detailed billing information, direct them to the OpenAI usage and billing dashboard.\n"
+        )
+
+    return (
+        "About this application:\n"
+        "- This tool is currently powered by Anthropic's Claude API.\n"
+        "- You have a tool called get_app_usage_stats that can retrieve cumulative token usage for this application.\n"
+        "- If users ask about API usage, billing, or token consumption, use that tool. "
+        "For detailed billing information, direct them to the Anthropic console at "
+        "https://console.anthropic.com/ or https://platform.claude.com/usage.\n"
+    )
+
+
+def build_system_prompt_text(
+    include_knowledge: bool = False,
+    provider: str = "claude",
+) -> str:
+    """Assemble a plain-text system prompt for providers that expect a string."""
+    prompt = BASE_SYSTEM_PROMPT + "\n" + _build_provider_note(provider) + "\n" + DB_SCHEMA_SUMMARY
+
+    if include_knowledge:
+        prompt += "\n\n" + load_knowledge_base()
+    else:
+        prompt += (
+            "\n\nNote: A fundraising best-practices knowledge base is available. "
+            "If the user asks about strategy, best practices, or 'how to' questions "
+            "about fundraising, let them know you can provide guidance and ask them "
+            "to rephrase if needed.\n"
+        )
+
+    return prompt
+
+
+def build_system_prompt(
+    include_knowledge: bool = False,
+    provider: str = "claude",
+) -> list[dict]:
     """Assemble the system prompt as a list of content blocks for the API.
 
     Returns a list of dicts suitable for the 'system' parameter of messages.create().
@@ -99,7 +138,7 @@ def build_system_prompt(include_knowledge: bool = False) -> list[dict]:
         include_knowledge: If True, append the fundraising knowledge base. Set this
                            based on needs_knowledge_base() for the current query.
     """
-    base_content = BASE_SYSTEM_PROMPT + DB_SCHEMA_SUMMARY
+    base_content = BASE_SYSTEM_PROMPT + "\n" + _build_provider_note(provider) + "\n" + DB_SCHEMA_SUMMARY
 
     if include_knowledge:
         kb_content = load_knowledge_base()
