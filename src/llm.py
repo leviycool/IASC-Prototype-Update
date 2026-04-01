@@ -7,6 +7,7 @@ environments configured with OpenAI models.
 """
 
 import json
+import re
 import sys
 import time
 from datetime import datetime
@@ -250,6 +251,22 @@ def _provider_for_model(model: str) -> str:
     return "claude"
 
 
+def _build_openai_client(api_key: str, base_url: str | None = None):
+    client_kwargs = {"api_key": api_key}
+    if base_url:
+        client_kwargs["base_url"] = base_url
+    return OpenAI(**client_kwargs)
+
+
+def _infer_openai_base_url_from_error(exc: Exception) -> str | None:
+    """Extract a regional OpenAI hostname from an API error, if present."""
+    message = str(exc)
+    match = re.search(r"request to ([a-z]{2}\.api\.openai\.com)", message)
+    if not match:
+        return None
+    return f"https://{match.group(1)}/v1"
+
+
 def _openai_tools() -> list[dict]:
     tools = []
     for tool in TOOLS:
@@ -419,11 +436,7 @@ def _get_openai_response(
     if not api_key:
         raise RuntimeError("Missing OPENAI_API_KEY for the OpenAI backend.")
     base_url = get_base_url_for_provider("openai")
-
-    client_kwargs = {"api_key": api_key}
-    if base_url:
-        client_kwargs["base_url"] = base_url
-    client = OpenAI(**client_kwargs)
+    client = _build_openai_client(api_key, base_url)
     include_kb = needs_knowledge_base(user_message)
     system_prompt = build_system_prompt_text(
         include_knowledge=include_kb,
@@ -467,6 +480,16 @@ def _get_openai_response(
                     f"({attempt + 1}/{MAX_RETRIES})..."
                 )
                 time.sleep(wait_time)
+            except Exception as exc:
+                inferred_base_url = _infer_openai_base_url_from_error(exc)
+                if inferred_base_url and inferred_base_url != base_url:
+                    base_url = inferred_base_url
+                    client = _build_openai_client(api_key, base_url)
+                    update_progress(
+                        f"OpenAI requested a regional endpoint; retrying with {base_url}..."
+                    )
+                    continue
+                raise
 
         latency_ms = (time.time() - start_time) * 1000
         message = response.choices[0].message
