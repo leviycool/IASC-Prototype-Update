@@ -255,7 +255,8 @@ if user_input:
                 status.update(label="Error", state="error", expanded=False)
                 response_text = (
                     f"**Error:** {e}\n\n"
-                    "Please check your ANTHROPIC_API_KEY in `.env` and try again."
+                    "Please check your configured API key (`ANTHROPIC_API_KEY` or "
+                    "`OPENAI_API_KEY`) in `.env` or Streamlit secrets and try again."
                 )
                 response_usage = None
 

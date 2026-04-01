@@ -50,11 +50,6 @@ BACKEND_OPTIONS = {
 DEFAULT_CLAUDE_MODEL = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
 DEFAULT_OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
 
-# Backwards-compatible default used by older callers/tests
-DEFAULT_MODEL = DEFAULT_CLAUDE_MODEL
-AVAILABLE_MODELS = CLAUDE_MODELS
-
-
 def get_models_for_provider(provider: str) -> dict[str, str]:
     """Return the available models for a provider."""
     if provider == "openai":
@@ -74,6 +69,17 @@ def get_api_key_for_provider(provider: str) -> str | None:
     if provider == "openai":
         return OPENAI_API_KEY
     return ANTHROPIC_API_KEY
+
+
+# Backwards-compatible defaults used by older callers/tests.
+# The app currently renders one provider at a time, so expose the selected
+# provider's model list while defaulting to Claude for unknown modes.
+if DEFAULT_PROVIDER == "openai":
+    DEFAULT_MODEL = DEFAULT_OPENAI_MODEL
+    AVAILABLE_MODELS = OPENAI_MODELS
+else:
+    DEFAULT_MODEL = DEFAULT_CLAUDE_MODEL
+    AVAILABLE_MODELS = CLAUDE_MODELS
 
 
 try:
