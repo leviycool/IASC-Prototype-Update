@@ -38,6 +38,7 @@ from config import (
     DEFAULT_MODEL,
     MAX_TOOL_CALLS_PER_TURN,
     get_api_key_for_provider,
+    get_base_url_for_provider,
 )
 from prompts import (
     build_system_prompt,
@@ -417,8 +418,12 @@ def _get_openai_response(
     api_key = get_api_key_for_provider("openai")
     if not api_key:
         raise RuntimeError("Missing OPENAI_API_KEY for the OpenAI backend.")
+    base_url = get_base_url_for_provider("openai")
 
-    client = OpenAI(api_key=api_key)
+    client_kwargs = {"api_key": api_key}
+    if base_url:
+        client_kwargs["base_url"] = base_url
+    client = OpenAI(**client_kwargs)
     include_kb = needs_knowledge_base(user_message)
     system_prompt = build_system_prompt_text(
         include_knowledge=include_kb,

@@ -293,7 +293,9 @@ if user_input:
                 response_text = (
                     f"**Error:** {e}\n\n"
                     "Please check your configured API key (`ANTHROPIC_API_KEY` or "
-                    "`OPENAI_API_KEY`) in `.env` or Streamlit secrets and try again."
+                    "`OPENAI_API_KEY`) in `.env` or Streamlit secrets and try again. "
+                    "If your OpenAI project uses a regional endpoint, also set "
+                    "`OPENAI_BASE_URL` (for example `https://us.api.openai.com/v1`)."
                 )
                 response_usage = None
 

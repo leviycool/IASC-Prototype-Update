@@ -26,6 +26,7 @@ def _get_secret(name: str) -> str | None:
 
 ANTHROPIC_API_KEY = _get_secret("ANTHROPIC_API_KEY")
 OPENAI_API_KEY = _get_secret("OPENAI_API_KEY")
+OPENAI_BASE_URL = _get_secret("OPENAI_BASE_URL")
 
 # Provider / model configuration
 DEFAULT_PROVIDER = os.environ.get("LLM_PROVIDER", "claude")
@@ -69,6 +70,13 @@ def get_api_key_for_provider(provider: str) -> str | None:
     if provider == "openai":
         return OPENAI_API_KEY
     return ANTHROPIC_API_KEY
+
+
+def get_base_url_for_provider(provider: str) -> str | None:
+    """Return an optional custom base URL for a provider."""
+    if provider == "openai":
+        return OPENAI_BASE_URL
+    return None
 
 
 # Backwards-compatible defaults used by older callers/tests.
