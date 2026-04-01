@@ -48,7 +48,17 @@ if not _DB_BOOTSTRAP_PATH.exists():
 # Add src to path for imports so this works regardless of where streamlit is launched
 sys.path.insert(0, str(Path(__file__).parent))
 
-from config import APP_TITLE, APP_SUBTITLE, AVAILABLE_MODELS, DEFAULT_MODEL, DB_PATH
+from config import (
+    APP_TITLE,
+    APP_SUBTITLE,
+    BACKEND_OPTIONS,
+    DB_PATH,
+    DEFAULT_MODEL,
+    DEFAULT_PROVIDER,
+    get_api_key_for_provider,
+    get_default_model_for_provider,
+    get_models_for_provider,
+)
 from llm import get_response
 from token_tracker import SessionTracker
 from knowledge import get_knowledge_token_estimate
@@ -72,6 +82,9 @@ if "tracker" not in st.session_state:
 
 if "selected_model" not in st.session_state:
     st.session_state.selected_model = DEFAULT_MODEL
+
+if "selected_provider" not in st.session_state:
+    st.session_state.selected_provider = DEFAULT_PROVIDER
 
 # pending_question is set by sample question buttons and consumed on the next run.
 # This is necessary because st.button() callbacks can't directly inject into
@@ -158,21 +171,45 @@ with st.sidebar:
 
     st.divider()
 
-    # Model selector
+    # Backend + model selector
     st.subheader("Settings")
-    # Build the display list from AVAILABLE_MODELS, preserving order
-    model_labels = list(AVAILABLE_MODELS.values())
-    current_label = AVAILABLE_MODELS.get(st.session_state.selected_model, model_labels[0])
+
+    backend_options = {
+        key: label for key, label in BACKEND_OPTIONS.items()
+        if key in {"claude", "openai"}
+    }
+    backend_keys = list(backend_options.keys())
+    if st.session_state.selected_provider not in backend_keys:
+        st.session_state.selected_provider = DEFAULT_PROVIDER
+
+    selected_backend = st.selectbox(
+        "Backend",
+        options=backend_keys,
+        index=backend_keys.index(st.session_state.selected_provider),
+        format_func=lambda key: backend_options[key],
+    )
+    st.session_state.selected_provider = selected_backend
+
+    provider_models = get_models_for_provider(selected_backend)
+    if st.session_state.selected_model not in provider_models:
+        st.session_state.selected_model = get_default_model_for_provider(selected_backend)
+
+    model_labels = list(provider_models.values())
+    current_label = provider_models.get(st.session_state.selected_model, model_labels[0])
     selected_label = st.selectbox(
         "Model",
         options=model_labels,
         index=model_labels.index(current_label),
     )
-    # Map the chosen label back to a model ID
-    for model_id, label in AVAILABLE_MODELS.items():
+
+    for model_id, label in provider_models.items():
         if label == selected_label:
             st.session_state.selected_model = model_id
             break
+
+    if not get_api_key_for_provider(selected_backend):
+        backend_name = backend_options[selected_backend]
+        st.caption(f"{backend_name} API key not configured for this deployment.")
 
     # Knowledge base size hint — helps students understand token costs
     kb_tokens = get_knowledge_token_estimate()
