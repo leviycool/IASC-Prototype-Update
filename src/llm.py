@@ -251,6 +251,13 @@ def _provider_for_model(model: str) -> str:
     return "claude"
 
 
+def _normalize_progress_message(message: str) -> str:
+    """Keep status text short and provider-neutral in the UI."""
+    if message.startswith("OpenAI requested a regional endpoint; retrying"):
+        return "Generating answer..."
+    return message
+
+
 def _build_openai_client(api_key: str, base_url: str | None = None):
     client_kwargs = {"api_key": api_key}
     if base_url:
@@ -343,7 +350,7 @@ def _get_claude_response(
 
     def update_progress(message: str) -> None:
         if progress_callback:
-            progress_callback(message)
+            progress_callback(_normalize_progress_message(message))
 
     if include_kb:
         update_progress("Loading fundraising knowledge base...")
@@ -451,7 +458,7 @@ def _get_openai_response(
 
     def update_progress(message: str) -> None:
         if progress_callback:
-            progress_callback(message)
+            progress_callback(_normalize_progress_message(message))
 
     if include_kb:
         update_progress("Loading fundraising knowledge base...")
