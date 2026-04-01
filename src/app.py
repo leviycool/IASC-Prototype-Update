@@ -9,17 +9,41 @@ from pathlib import Path
 import streamlit as st
 
 # Auto-initialize the donor database if it does not exist.
-# This runs on first startup in Streamlit Cloud and GitHub Codespaces.
+# Prefer importing the checked-in CSV files so deployments use the latest
+# shared dataset, and fall back to generated mock data for developer setups.
 import importlib.util
 
-_db_path = Path(__file__).parent.parent / "data" / "donors.db"
-if not _db_path.exists():
-    _gen_path = Path(__file__).parent.parent / "data" / "generate_mock_data.py"
-    spec = importlib.util.spec_from_file_location("generate_mock_data", _gen_path)
-    _gen = importlib.util.module_from_spec(spec)
-    _gen.__file__ = str(_gen_path)  # ensures Path(__file__).parent resolves correctly inside the script
-    spec.loader.exec_module(_gen)
-    _gen.main()  # main() only runs under __name__ == "__main__", so call it explicitly
+_DATA_DIR = Path(__file__).parent.parent / "data"
+_DB_BOOTSTRAP_PATH = _DATA_DIR / "donors.db"
+_REQUIRED_CSVS = (
+    _DATA_DIR / "synthetic_donors_contacts.csv",
+    _DATA_DIR / "synthetic_donors_gifts.csv",
+    _DATA_DIR / "synthetic_donors_interactions.csv",
+)
+
+
+def _run_data_script(script_path: Path, module_name: str) -> None:
+    spec = importlib.util.spec_from_file_location(module_name, script_path)
+    module = importlib.util.module_from_spec(spec)
+    module.__file__ = str(script_path)
+    if spec.loader is None:
+        raise ImportError(f"Could not load {script_path}")
+    spec.loader.exec_module(module)
+
+    original_argv = sys.argv[:]
+    try:
+        sys.argv = [str(script_path)]
+        module.main()
+    finally:
+        sys.argv = original_argv
+
+
+if not _DB_BOOTSTRAP_PATH.exists():
+    importer_path = _DATA_DIR / "import_csv_to_db.py"
+    if importer_path.exists() and all(path.exists() for path in _REQUIRED_CSVS):
+        _run_data_script(importer_path, "import_csv_to_db")
+    else:
+        _run_data_script(_DATA_DIR / "generate_mock_data.py", "generate_mock_data")
 
 # Add src to path for imports so this works regardless of where streamlit is launched
 sys.path.insert(0, str(Path(__file__).parent))
@@ -104,7 +128,7 @@ with st.sidebar:
         except Exception as e:
             st.warning(f"Could not load stats: {e}")
     else:
-        st.warning("Database not found. Run: `python data/generate_mock_data.py`")
+        st.warning("Database not found. Run: `python data/import_csv_to_db.py` or `python data/generate_mock_data.py`")
 
     st.divider()
 
