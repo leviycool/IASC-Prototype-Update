@@ -1,6 +1,6 @@
 # IASC Donor Analytics
 
-An AI-powered donor intelligence prototype for the Institute for Advanced Studies in Culture (IASC), a nonprofit research center and publisher at the University of Virginia. The tool lets a development team ask natural language questions about their donor database — "Which lapsed donors in Virginia gave more than $5,000?", "Plan a fundraising trip to NYC", "Who are our highest-potential prospects?" — and receive data-grounded, actionable answers. Claude (Anthropic) handles intent parsing and response synthesis; Python functions query a SQLite database and return structured results; a curated knowledge base of fundraising best practices is injected into the system prompt so every answer is informed by domain expertise.
+An AI-powered donor intelligence prototype for the Institute for Advanced Studies in Culture (IASC), a nonprofit research center and publisher at the University of Virginia. The tool lets a development team ask natural language questions about their donor database — "Which lapsed donors in Virginia gave more than $5,000?", "Plan a fundraising trip to NYC", "Who are our highest-potential prospects?" — and receive data-grounded, actionable answers. The default setup uses Claude (Anthropic) for intent parsing and response synthesis, and the configuration layer also includes an OpenAI backend. Python functions query a SQLite database and return structured results; a curated knowledge base of fundraising best practices is injected into the system prompt so every answer is informed by domain expertise.
 
 > **This repository uses entirely synthetic data.** The donor database is generated procedurally by `data/generate_mock_data.py` and contains no real names, contact information, giving history, or any other actual IASC data. No real donor data has ever been committed to this repository.
 
@@ -15,9 +15,9 @@ cd iasc-donor-tool
 # Install dependencies (Python 3.11+ required)
 pip install -r requirements.txt
 
-# Set your Anthropic API key
+# Set your API key(s)
 cp .env.example .env
-# Open .env and set: ANTHROPIC_API_KEY=sk-ant-...
+# Open .env and set either ANTHROPIC_API_KEY=... or OPENAI_API_KEY=...
 
 # Generate the mock donor database (300 synthetic records)
 python data/generate_mock_data.py
@@ -28,14 +28,42 @@ streamlit run src/app.py
 
 The app will open in your browser at `http://localhost:8501`.
 
+### Backend configuration
+
+The app reads API keys from Streamlit secrets first and then from environment variables in `.env`. Backend defaults and model IDs are defined in `src/config.py`.
+
+To use the default Claude backend locally:
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-...
+LLM_PROVIDER=claude
+CLAUDE_MODEL=claude-sonnet-4-20250514
+```
+
+To use the OpenAI backend locally:
+
+```bash
+OPENAI_API_KEY=sk-proj-...
+LLM_PROVIDER=openai
+OPENAI_MODEL=gpt-4.1
+```
+
+Current model options:
+
+- Claude: `claude-sonnet-4-20250514` or `claude-haiku-4-5-20251001`
+- OpenAI: `gpt-4.1` or `gpt-4.1-mini`
+
+If both providers are configured, `LLM_PROVIDER` determines which backend is used. If it is unset, the app defaults to `claude`.
+
 ---
 
 ## Running in GitHub Codespaces (no local setup required)
 
 1. Click the green **Code** button on the repo page, then **Codespaces > New codespace**.
 2. Wait for the environment to build (about 2 minutes the first time).
-3. Add your Anthropic API key as a Codespaces secret: go to github.com > Settings > Codespaces > Secrets,
-   create a secret named `ANTHROPIC_API_KEY`, and set its value to your key. Grant it access to this repo.
+3. Add your API key as a Codespaces secret: go to github.com > Settings > Codespaces > Secrets,
+   create `ANTHROPIC_API_KEY` for Claude or `OPENAI_API_KEY` for OpenAI. If you want OpenAI by default,
+   also add `LLM_PROVIDER=openai` and optionally `OPENAI_MODEL=gpt-4.1`.
 4. In the Codespace terminal, run: `streamlit run src/app.py`
 5. When prompted, click **Open in Browser** to view the app.
 
@@ -48,18 +76,19 @@ You do not need to run `generate_mock_data.py` manually.
 2. Go to share.streamlit.io and connect your GitHub account.
 3. Create a new app, pointing to `src/app.py` in your fork.
 4. Under **Advanced settings > Secrets**, paste the contents of `.streamlit/secrets.toml.example`
-   and replace the placeholder with your real API key.
+   and replace the placeholder with your real API key. To use OpenAI on Streamlit Cloud, also add
+   `LLM_PROVIDER = "openai"` and optionally `OPENAI_MODEL = "gpt-4.1"` or `OPENAI_MODEL = "gpt-4.1-mini"`.
 5. Click **Deploy**. The mock database will be generated automatically on first startup.
 
 Note: do not use real donor data with this deployment. The app has no authentication.
 
-**To rotate the API key after initial deployment:** go to https://share.streamlit.io, find the app, click the three-dot menu (⋮) on the right > **Settings** > **Secrets**, and update the value to the new key in the format `ANTHROPIC_API_KEY = "sk-ant-..."`  . The app will restart automatically.
+**To rotate the API key after initial deployment:** go to https://share.streamlit.io, find the app, click the three-dot menu (⋮) on the right > **Settings** > **Secrets**, and update the value to the new key in the format `ANTHROPIC_API_KEY = "sk-ant-..."` or `OPENAI_API_KEY = "sk-proj-..."`. The app will restart automatically.
 
 ---
 
 ## Using the app
 
-**Chat interface:** Type any question about donors in the chat box at the bottom of the page. Claude will call one or more data query functions, synthesize the results, and display a response with specific names, amounts, and dates from the database.
+**Chat interface:** Type any question about donors in the chat box at the bottom of the page. The configured LLM backend will call one or more data query functions, synthesize the results, and display a response with specific names, amounts, and dates from the database.
 
 **Sample questions:** The left sidebar contains eight pre-written example queries. Click any of them to send it directly to the chat without typing.
 
@@ -67,7 +96,7 @@ Note: do not use real donor data with this deployment. The app has no authentica
 
 **Token usage:** Every assistant response displays an inline usage line below it showing the model used, number of API calls, input/output token counts, estimated cost, and latency. The sidebar accumulates session totals so you can track your spending across a full session.
 
-**Model selection:** Use the Settings section in the sidebar to switch between Claude Sonnet (the default, recommended for production quality) and Claude Haiku (faster and cheaper, useful for development and testing).
+**Model selection:** In the default Claude configuration, use the Settings section in the sidebar to switch between Claude Sonnet and Claude Haiku. OpenAI backend selection is configured through `LLM_PROVIDER` and `OPENAI_MODEL` as described above.
 
 **Clear conversation:** The "Clear conversation" button at the bottom of the sidebar resets both the chat history and the session token tracker.
 
