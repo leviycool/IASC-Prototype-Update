@@ -19,8 +19,11 @@ pip install -r requirements.txt
 cp .env.example .env
 # Open .env and set either ANTHROPIC_API_KEY=... or OPENAI_API_KEY=...
 
-# Generate the mock donor database (300 synthetic records)
+# Generate the mock donor database (default synthetic dataset)
 python data/generate_mock_data.py
+
+# Or import the checked-in donor CSV files into SQLite
+python data/import_csv_to_db.py
 
 # Launch the app
 streamlit run src/app.py
@@ -48,12 +51,28 @@ LLM_PROVIDER=openai
 OPENAI_MODEL=gpt-4.1
 ```
 
+If your OpenAI project uses a regional endpoint, also set:
+
+```bash
+OPENAI_BASE_URL=https://us.api.openai.com/v1
+```
+
 Current model options:
 
 - Claude: `claude-sonnet-4-20250514` or `claude-haiku-4-5-20251001`
 - OpenAI: `gpt-4.1` or `gpt-4.1-mini`
 
 If both providers are configured, `LLM_PROVIDER` determines which backend is used. If it is unset, the app defaults to `claude`.
+
+### Data bootstrapping
+
+The app always queries `data/donors.db`. On startup it uses this priority order:
+
+1. Use `data/donors.db` if it already exists.
+2. If the three donor CSV files are present in `data/`, rebuild `donors.db` from them with `data/import_csv_to_db.py`.
+3. Otherwise fall back to `data/generate_mock_data.py`.
+
+This makes local development and Streamlit Cloud deployments behave the same way: CSV-backed datasets are preferred when available, and synthetic mock data remains the safe fallback.
 
 ---
 
@@ -64,6 +83,8 @@ If both providers are configured, `LLM_PROVIDER` determines which backend is use
 3. Add your API key as a Codespaces secret: go to github.com > Settings > Codespaces > Secrets,
    create `ANTHROPIC_API_KEY` for Claude or `OPENAI_API_KEY` for OpenAI. If you want OpenAI by default,
    also add `LLM_PROVIDER=openai` and optionally `OPENAI_MODEL=gpt-4.1`.
+   If your OpenAI project is tied to a regional endpoint, also add
+   `OPENAI_BASE_URL=https://us.api.openai.com/v1`.
 4. In the Codespace terminal, run: `streamlit run src/app.py`
 5. When prompted, click **Open in Browser** to view the app.
 
@@ -78,6 +99,8 @@ You do not need to run `generate_mock_data.py` manually.
 4. Under **Advanced settings > Secrets**, paste the contents of `.streamlit/secrets.toml.example`
    and replace the placeholder with your real API key. To use OpenAI on Streamlit Cloud, also add
    `LLM_PROVIDER = "openai"` and optionally `OPENAI_MODEL = "gpt-4.1"` or `OPENAI_MODEL = "gpt-4.1-mini"`.
+   If your OpenAI project requires a regional hostname, also set
+   `OPENAI_BASE_URL = "https://us.api.openai.com/v1"`.
 5. Click **Deploy**. The mock database will be generated automatically on first startup.
 
 Note: do not use real donor data with this deployment. The app has no authentication.
@@ -96,7 +119,7 @@ Note: do not use real donor data with this deployment. The app has no authentica
 
 **Token usage:** Every assistant response displays an inline usage line below it showing the model used, number of API calls, input/output token counts, estimated cost, and latency. The sidebar accumulates session totals so you can track your spending across a full session.
 
-**Model selection:** In the default Claude configuration, use the Settings section in the sidebar to switch between Claude Sonnet and Claude Haiku. OpenAI backend selection is configured through `LLM_PROVIDER` and `OPENAI_MODEL` as described above.
+**Backend and model selection:** The Settings section in the sidebar now includes both a `Backend` selector and a `Model` selector. You can switch between Claude and OpenAI in the UI, then choose a model from the active provider. If the selected provider is missing its API key, the sidebar shows a warning instead of silently failing.
 
 **Clear conversation:** The "Clear conversation" button at the bottom of the sidebar resets both the chat history and the session token tracker.
 
@@ -108,7 +131,8 @@ Note: do not use real donor data with this deployment. The app has no authentica
 User question (Streamlit chat)
         |
         v
-Claude API (Sonnet) with tool use
+Configured LLM backend
+(`Claude` or `OpenAI`) with tool use
         |                    \
         v                     v
 Python functions that     Knowledge base
@@ -116,10 +140,10 @@ query SQLite/pandas       (fundraising best practices,
         |                  injected into system prompt)
         v                     |
 Query results returned ------/
-to Claude
+to the LLM backend
         |
         v
-Claude generates natural language response
+LLM generates natural language response
 with data citations + best practice guidance
         |
         v
@@ -129,10 +153,10 @@ Displayed in Streamlit UI
 
 **Key design decisions:**
 
-- **Tool use, not RAG:** Donor data is tabular and well-structured. Claude decides which filters and operations to apply; Python executes parameterized SQL queries. This is more reliable and cheaper than embedding donor records.
+- **Tool use, not RAG:** Donor data is tabular and well-structured. The active LLM backend decides which filters and operations to apply; Python executes parameterized SQL queries. This is more reliable and cheaper than embedding donor records.
 - **Knowledge base injection:** Fundraising best practices and IASC-specific context are loaded as markdown and appended to the system prompt on every call. This is simple, transparent, and easy to extend.
 - **Token tracking:** Every API call is timed and counted. Costs are displayed inline so users develop intuition for what different query types cost.
-- **No LangChain or LlamaIndex:** The tool use loop is implemented directly with the Anthropic SDK. This is intentional — the code is easier to read, debug, and teach.
+- **No LangChain or LlamaIndex:** The tool use loop is implemented directly with provider SDKs. This is intentional — the code is easier to read, debug, and teach.
 
 ---
 
@@ -145,8 +169,10 @@ iasc-donor-tool/
 ├── .env.example               # Template for API keys
 ├── data/
 │   ├── generate_mock_data.py  # Script to create synthetic donor database
+│   ├── import_csv_to_db.py    # Rebuild donors.db from donor CSV files
 │   ├── donors.db              # SQLite database (generated)
 │   ├── data_dictionary.md     # Field definitions and source mappings
+│   ├── synthetic_donors_*.csv # Optional CSV-backed deployment dataset
 │   └── sample_salesforce.csv  # Real IASC sample (91 records, anonymized)
 ├── knowledge/
 │   ├── fundraising_best_practices.md  # Core knowledge base document
@@ -185,7 +211,7 @@ pytest tests/test_scenarios.py -v
 pytest tests/test_scenarios.py -v -k "top_donors"
 ```
 
-The test suite requires `data/donors.db` to exist. If it does not, the query tests will be skipped with a clear message. The scenario tests additionally require `ANTHROPIC_API_KEY` to be set.
+The test suite requires `data/donors.db` to exist. If it does not, the query tests will be skipped with a clear message. The current scenario tests additionally require `ANTHROPIC_API_KEY`; they have not yet been generalized to run against both providers.
 
 ---
 
