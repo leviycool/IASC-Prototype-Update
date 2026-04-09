@@ -204,6 +204,60 @@ TOOLS = [
     },
 ]
 
+
+def _get_app_usage_stats_with_provenance(
+    since: Optional[str] = None,
+    model: Optional[str] = None,
+) -> dict:
+    """Wrap usage stats with the same provenance structure as donor queries."""
+    result = get_usage_summary(since=since, model=model)
+
+    filters = []
+    if since is not None:
+        filters.append(
+            {
+                "field": "timestamp",
+                "operator": ">=",
+                "value": since,
+                "display": f"timestamp >= {since}",
+            }
+        )
+    if model is not None:
+        filters.append(
+            {
+                "field": "model",
+                "operator": "=",
+                "value": model,
+                "display": f"model = {model}",
+            }
+        )
+
+    result["provenance"] = {
+        "tool": "get_app_usage_stats",
+        "source_tables": [
+            {
+                "name": "api_calls",
+                "fields": [
+                    "timestamp",
+                    "model",
+                    "input_tokens",
+                    "output_tokens",
+                    "cache_creation_input_tokens",
+                    "cache_read_input_tokens",
+                    "question",
+                    "session_id",
+                ],
+            }
+        ],
+        "filters": filters,
+        "notes": [
+            "Aggregated from the local usage log.",
+            "Includes a per-model breakdown.",
+        ],
+    }
+    return result
+
+
 TOOL_FUNCTIONS = {
     "search_donors": queries.search_donors,
     "get_donor_detail": queries.get_donor_detail,
@@ -212,24 +266,32 @@ TOOL_FUNCTIONS = {
     "get_lapsed_donors": queries.get_lapsed_donors,
     "get_prospects_by_potential": queries.get_prospects_by_potential,
     "plan_fundraising_trip": queries.plan_fundraising_trip,
-    "get_app_usage_stats": lambda **kwargs: get_usage_summary(**kwargs),
+    "get_app_usage_stats": _get_app_usage_stats_with_provenance,
 }
 
 MAX_RETRIES = 3
 
 
-def execute_tool(tool_name: str, tool_input: dict) -> str:
-    """Execute a tool call and return the result as JSON."""
+def execute_tool(tool_name: str, tool_input: dict) -> tuple[str, Optional[dict]]:
+    """Execute a tool call and return model-facing JSON plus UI provenance."""
     if tool_name not in TOOL_FUNCTIONS:
-        return json.dumps({"error": f"Unknown tool: {tool_name}"})
+        return json.dumps({"error": f"Unknown tool: {tool_name}"}), None
 
     try:
         result = TOOL_FUNCTIONS[tool_name](**tool_input)
-        return json.dumps(result, default=str)
+        provenance = None
+        model_result = result
+        if isinstance(result, dict):
+            model_result = dict(result)
+            provenance = model_result.pop("provenance", None)
+            if isinstance(provenance, dict) and not provenance.get("tool"):
+                provenance = dict(provenance)
+                provenance["tool"] = tool_name
+        return json.dumps(model_result, default=str), provenance
     except TypeError as exc:
-        return json.dumps({"error": f"Invalid parameters for {tool_name}: {exc}"})
+        return json.dumps({"error": f"Invalid parameters for {tool_name}: {exc}"}), None
     except Exception as exc:
-        return json.dumps({"error": f"Tool execution failed: {exc}"})
+        return json.dumps({"error": f"Tool execution failed: {exc}"}), None
 
 
 def _summarize_tool_params(tool_name: str, params: dict) -> str:
@@ -315,10 +377,11 @@ def _finalize_response(
     final_text: str,
     response_usage: ResponseUsage,
     session_tracker: Optional[SessionTracker],
-) -> tuple[str, ResponseUsage]:
+    response_provenance: list[dict],
+) -> tuple[str, ResponseUsage, list[dict]]:
     if session_tracker is not None:
         session_tracker.responses.append(response_usage)
-    return final_text, response_usage
+    return final_text, response_usage, response_provenance
 
 
 def _get_claude_response(
@@ -328,7 +391,7 @@ def _get_claude_response(
     session_tracker: Optional[SessionTracker],
     progress_callback: Optional[Callable[[str], None]],
     st_session_id: Optional[str],
-) -> tuple[str, ResponseUsage]:
+) -> tuple[str, ResponseUsage, list[dict]]:
     if anthropic is None:
         raise RuntimeError(
             "The `anthropic` package is not installed. Add it to the environment "
@@ -346,6 +409,7 @@ def _get_claude_response(
     )
     messages = conversation_history + [{"role": "user", "content": user_message}]
     response_usage = ResponseUsage(question=user_message)
+    response_provenance: list[dict] = []
     tool_call_count = 0
 
     def update_progress(message: str) -> None:
@@ -397,7 +461,12 @@ def _get_claude_response(
         if response.stop_reason == "end_turn" or not had_tool_use:
             text_blocks = [block.text for block in response.content if hasattr(block, "text")]
             final_text = "\n".join(text_blocks) if text_blocks else "(No response generated)"
-            return _finalize_response(final_text, response_usage, session_tracker)
+            return _finalize_response(
+                final_text,
+                response_usage,
+                session_tracker,
+                response_provenance,
+            )
 
         tool_results = []
         for block in response.content:
@@ -406,7 +475,9 @@ def _get_claude_response(
             tool_call_count += 1
             params_summary = _summarize_tool_params(block.name, block.input)
             update_progress(f"Querying: {block.name}({params_summary})")
-            result_str = execute_tool(block.name, block.input)
+            result_str, provenance = execute_tool(block.name, block.input)
+            if provenance:
+                response_provenance.append(provenance)
             tool_results.append(
                 {
                     "type": "tool_result",
@@ -423,6 +494,7 @@ def _get_claude_response(
         "I reached the maximum number of tool calls for this question. Please try a more specific query.",
         response_usage,
         session_tracker,
+        response_provenance,
     )
 
 
@@ -433,7 +505,7 @@ def _get_openai_response(
     session_tracker: Optional[SessionTracker],
     progress_callback: Optional[Callable[[str], None]],
     st_session_id: Optional[str],
-) -> tuple[str, ResponseUsage]:
+) -> tuple[str, ResponseUsage, list[dict]]:
     if OpenAI is None:
         raise RuntimeError(
             "The `openai` package is not installed. Add it to the environment "
@@ -453,6 +525,7 @@ def _get_openai_response(
     messages.extend(conversation_history)
     messages.append({"role": "user", "content": user_message})
     response_usage = ResponseUsage(question=user_message)
+    response_provenance: list[dict] = []
     tool_call_count = 0
     openai_tools = _openai_tools()
 
@@ -513,7 +586,12 @@ def _get_openai_response(
 
         if not tool_calls:
             final_text = message.content or "(No response generated)"
-            return _finalize_response(final_text, response_usage, session_tracker)
+            return _finalize_response(
+                final_text,
+                response_usage,
+                session_tracker,
+                response_provenance,
+            )
 
         messages.append(message.model_dump(exclude_none=True))
 
@@ -522,7 +600,9 @@ def _get_openai_response(
             tool_input = json.loads(tool_call.function.arguments or "{}")
             params_summary = _summarize_tool_params(tool_call.function.name, tool_input)
             update_progress(f"Querying: {tool_call.function.name}({params_summary})")
-            result_str = execute_tool(tool_call.function.name, tool_input)
+            result_str, provenance = execute_tool(tool_call.function.name, tool_input)
+            if provenance:
+                response_provenance.append(provenance)
             messages.append(
                 {
                     "role": "tool",
@@ -537,6 +617,7 @@ def _get_openai_response(
         "I reached the maximum number of tool calls for this question. Please try a more specific query.",
         response_usage,
         session_tracker,
+        response_provenance,
     )
 
 
@@ -547,7 +628,7 @@ def get_response(
     session_tracker: Optional[SessionTracker] = None,
     progress_callback: Optional[Callable[[str], None]] = None,
     st_session_id: Optional[str] = None,
-) -> tuple[str, ResponseUsage]:
+) -> tuple[str, ResponseUsage, list[dict]]:
     """Send a user message through the full tool-use loop."""
     provider = _provider_for_model(model)
     if provider == "openai":

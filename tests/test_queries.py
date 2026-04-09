@@ -40,6 +40,18 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def assert_has_provenance(result: dict) -> dict:
+    """Assert the common provenance shape and return it for deeper checks."""
+    assert "provenance" in result
+    provenance = result["provenance"]
+    assert isinstance(provenance, dict)
+    assert "tool" in provenance
+    assert "source_tables" in provenance
+    assert "filters" in provenance
+    assert "notes" in provenance
+    return provenance
+
+
 # ===========================================================================
 # TestSearchDonors
 # ===========================================================================
@@ -52,6 +64,17 @@ class TestSearchDonors:
         assert "results" in result
         assert "count" in result
         assert "summary" in result
+        assert_has_provenance(result)
+
+    def test_provenance_tracks_fields_and_filters(self):
+        result = search_donors(state="VA", donor_status="active", limit=5)
+        provenance = assert_has_provenance(result)
+        assert provenance["tool"] == "search_donors"
+        assert provenance["source_tables"][0]["name"] == "contacts"
+        assert "state" in provenance["source_tables"][0]["fields"]
+        displays = [item["display"] for item in provenance["filters"]]
+        assert "state = VA" in displays
+        assert "donor_status = active" in displays
 
     def test_state_filter_returns_only_that_state(self):
         result = search_donors(state="VA")
@@ -211,6 +234,7 @@ class TestLapsedDonors:
         assert "results" in result
         assert "count" in result
         assert "summary" in result
+        assert_has_provenance(result)
 
     def test_returns_results(self):
         result = get_lapsed_donors()
@@ -269,6 +293,15 @@ class TestFundraisingTrip:
         assert "results" in result
         assert "count" in result
         assert "summary" in result
+        assert_has_provenance(result)
+
+    def test_provenance_mentions_composite_ranking(self):
+        result = plan_fundraising_trip(target_state="NY", limit=5)
+        provenance = assert_has_provenance(result)
+        notes_text = " ".join(provenance["notes"]).lower()
+        assert "composite score" in notes_text
+        displays = [item["display"] for item in provenance["filters"]]
+        assert "state = NY" in displays
 
     def test_returns_scored_results(self):
         result = plan_fundraising_trip(target_state="NY")
@@ -342,6 +375,7 @@ class TestSummaryStatistics:
         assert "results" in result
         assert "count" in result
         assert "summary" in result
+        assert_has_provenance(result)
 
     def test_overall_stats_has_total_contacts(self):
         result = get_summary_statistics()
@@ -402,6 +436,7 @@ class TestGeographicDistribution:
         assert "results" in result
         assert "count" in result
         assert "summary" in result
+        assert_has_provenance(result)
 
     def test_returns_state_data(self):
         result = get_geographic_distribution()
@@ -446,6 +481,7 @@ class TestProspectsByPotential:
         assert "results" in result
         assert "count" in result
         assert "summary" in result
+        assert_has_provenance(result)
 
     def test_returns_only_prospects(self):
         result = get_prospects_by_potential()
@@ -514,6 +550,17 @@ class TestDonorDetail:
         assert "results" in result
         assert "count" in result
         assert "summary" in result
+        assert_has_provenance(result)
+
+    def test_provenance_mentions_contact_gifts_and_interactions(self):
+        search = search_donors(donor_status="active", limit=1)
+        if search["count"] == 0:
+            pytest.skip("No active donors in database")
+        contact_id = search["results"][0]["contact_id"]
+        result = get_donor_detail(contact_id)
+        provenance = assert_has_provenance(result)
+        table_names = [table["name"] for table in provenance["source_tables"]]
+        assert table_names == ["contacts", "gifts", "interactions"]
 
     def test_returns_complete_record(self):
         search = search_donors(donor_status="active", limit=1)
