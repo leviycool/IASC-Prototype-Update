@@ -170,7 +170,6 @@ class SessionTracker:
     def format_sidebar(self) -> str:
         """Format summary for the Streamlit sidebar."""
         return (
-            f"**Session usage**\n\n"
             f"- Questions asked: {len(self.responses)}\n"
             f"- API calls: {self.total_api_calls}\n"
             f"- Input tokens: {self.total_input_tokens:,}\n"
