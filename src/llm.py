@@ -288,54 +288,6 @@ def _build_response_cache_key(
     return hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
 
 
-def _extract_summary_sentence(text: str) -> str:
-    """Build a short one-line summary from the leading content."""
-    cleaned_lines = []
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        line = re.sub(r"^[-*]\s+", "", line)
-        line = re.sub(r"^\d+\.\s+", "", line)
-        if line:
-            cleaned_lines.append(line)
-        if len(" ".join(cleaned_lines)) >= 220:
-            break
-
-    candidate = " ".join(cleaned_lines)
-    if not candidate:
-        return "TL;DR: Answer generated."
-
-    sentence_match = re.match(r"(.{20,220}?[.!?])(?:\s|$)", candidate)
-    if sentence_match:
-        summary = sentence_match.group(1).strip()
-    elif len(candidate) <= 180:
-        summary = candidate
-    else:
-        summary = candidate[:177].rsplit(" ", 1)[0].strip() + "..."
-
-    return f"TL;DR: {summary}"
-
-
-def _format_final_response(final_text: str) -> str:
-    """Keep answers scannable, adding a TL;DR to long responses when needed."""
-    text = final_text.strip()
-    if not text:
-        return text
-
-    text = re.sub(r"\n{3,}", "\n\n", text)
-
-    if re.match(r"(?is)^tl;dr:", text):
-        return text
-
-    word_count = len(re.findall(r"\b\w+\b", text))
-    non_empty_lines = [line for line in text.splitlines() if line.strip()]
-    if word_count < 100 and len(non_empty_lines) <= 6 and len(text) < 550:
-        return text
-
-    return f"{_extract_summary_sentence(text)}\n\n{text}"
-
-
 def _maybe_get_cached_response(
     cache_key: str,
     response_usage: ResponseUsage,
@@ -533,7 +485,6 @@ def _get_claude_response(
         if response.stop_reason == "end_turn" or not had_tool_use:
             text_blocks = [block.text for block in response.content if hasattr(block, "text")]
             final_text = "\n".join(text_blocks) if text_blocks else "(No response generated)"
-            final_text = _format_final_response(final_text)
             if RESPONSE_CACHE_ENABLED:
                 put_cached_response(cache_key, "claude", model, final_text)
             return _finalize_response(final_text, response_usage, session_tracker)
@@ -665,7 +616,6 @@ def _get_openai_response(
 
         if not tool_calls:
             final_text = message.content or "(No response generated)"
-            final_text = _format_final_response(final_text)
             if RESPONSE_CACHE_ENABLED:
                 put_cached_response(cache_key, "openai", model, final_text)
             return _finalize_response(final_text, response_usage, session_tracker)
