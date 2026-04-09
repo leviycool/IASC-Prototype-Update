@@ -63,91 +63,6 @@ from llm import get_response
 from token_tracker import SessionTracker
 from knowledge import get_knowledge_token_estimate
 
-
-def _dedupe_preserve_order(items: list[str]) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-    for item in items:
-        if not item or item in seen:
-            continue
-        seen.add(item)
-        result.append(item)
-    return result
-
-
-def _aggregate_provenance(provenance_records: list[dict]) -> dict:
-    tools: list[str] = []
-    filters: list[str] = []
-    notes: list[str] = []
-    table_map: dict[str, list[str]] = {}
-
-    for record in provenance_records or []:
-        tool_name = record.get("tool")
-        if tool_name:
-            tools.append(str(tool_name))
-
-        for table in record.get("source_tables", []):
-            table_name = table.get("name")
-            if not table_name:
-                continue
-            fields = table_map.setdefault(str(table_name), [])
-            for field in table.get("fields", []):
-                field_str = str(field)
-                if field_str not in fields:
-                    fields.append(field_str)
-
-        for filter_item in record.get("filters", []):
-            if isinstance(filter_item, dict):
-                display = filter_item.get("display")
-            else:
-                display = str(filter_item)
-            if display:
-                filters.append(str(display))
-
-        for note in record.get("notes", []):
-            if note:
-                notes.append(str(note))
-
-    return {
-        "tools": _dedupe_preserve_order(tools),
-        "tables": [
-            {"name": name, "fields": fields}
-            for name, fields in table_map.items()
-        ],
-        "filters": _dedupe_preserve_order(filters),
-        "notes": _dedupe_preserve_order(notes),
-    }
-
-
-def _render_data_transparency(provenance_records: list[dict] | None) -> None:
-    with st.expander("Data Transparency", expanded=False):
-        if not provenance_records:
-            st.caption("No donor or usage tables were queried for this answer.")
-            return
-
-        aggregated = _aggregate_provenance(provenance_records)
-
-        if aggregated["tools"]:
-            st.caption(f"Tool calls: {', '.join(aggregated['tools'])}")
-
-        st.markdown("**Source tables**")
-        if aggregated["tables"]:
-            for table in aggregated["tables"]:
-                fields = ", ".join(table["fields"]) or "No field metadata captured."
-                st.write(f"`{table['name']}`: {fields}")
-        else:
-            st.caption("No source tables were captured for this answer.")
-
-        if aggregated["filters"]:
-            st.markdown("**Applied filters**")
-            for filter_text in aggregated["filters"]:
-                st.caption(filter_text)
-
-        if aggregated["notes"]:
-            st.markdown("**Query logic**")
-            for note in aggregated["notes"]:
-                st.caption(note)
-
 # ─── Page configuration ───────────────────────────────────────────────────────
 
 st.set_page_config(
@@ -159,8 +74,7 @@ st.set_page_config(
 # ─── Session state initialization ─────────────────────────────────────────────
 
 if "messages" not in st.session_state:
-    # Each entry: {"role": str, "content": str, "usage": ResponseUsage|None,
-    #              "provenance": list[dict]|None}
+    # Each entry: {"role": str, "content": str, "usage": ResponseUsage|None}
     st.session_state.messages = []
 
 if "tracker" not in st.session_state:
@@ -328,8 +242,6 @@ st.warning(
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
-        if msg["role"] == "assistant":
-            _render_data_transparency(msg.get("provenance"))
         # Show token usage inline below each assistant message
         if msg.get("usage") is not None:
             st.caption(msg["usage"].format_inline(st.session_state.selected_model))
@@ -367,7 +279,7 @@ if user_input:
     with st.chat_message("assistant"):
         with st.status("Working on your question...", expanded=True) as status:
             try:
-                response_text, response_usage, response_provenance = get_response(
+                response_text, response_usage = get_response(
                     user_message=user_input,
                     conversation_history=history,
                     model=st.session_state.selected_model,
@@ -386,10 +298,8 @@ if user_input:
                     "`OPENAI_BASE_URL` (for example `https://us.api.openai.com/v1`)."
                 )
                 response_usage = None
-                response_provenance = None
 
         st.markdown(response_text)
-        _render_data_transparency(response_provenance)
         if response_usage is not None:
             st.caption(response_usage.format_inline(st.session_state.selected_model))
 
@@ -398,7 +308,6 @@ if user_input:
         "role": "assistant",
         "content": response_text,
         "usage": response_usage,
-        "provenance": response_provenance,
     })
 
     # Rerun so the sidebar session-usage section (rendered earlier in the

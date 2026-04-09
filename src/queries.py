@@ -48,56 +48,6 @@ def _rows_to_dicts(rows: list) -> list[dict]:
     return [dict(row) for row in rows]
 
 
-def _dedupe_preserve_order(items: list[str]) -> list[str]:
-    """Return unique items while preserving first-seen order."""
-    seen: set[str] = set()
-    result: list[str] = []
-    for item in items:
-        if not item or item in seen:
-            continue
-        seen.add(item)
-        result.append(item)
-    return result
-
-
-def _table_provenance(name: str, fields: list[str]) -> dict:
-    """Describe one source table and the fields used from it."""
-    return {
-        "name": name,
-        "fields": _dedupe_preserve_order(fields),
-    }
-
-
-def _filter_provenance(
-    field: str,
-    operator: str,
-    value,
-    display: Optional[str] = None,
-) -> dict:
-    """Describe one applied filter in a UI-friendly structure."""
-    return {
-        "field": field,
-        "operator": operator,
-        "value": value,
-        "display": display or f"{field} {operator} {value}",
-    }
-
-
-def _build_provenance(
-    tool_name: str,
-    source_tables: list[dict],
-    filters: Optional[list[dict]] = None,
-    notes: Optional[list[str]] = None,
-) -> dict:
-    """Build a consistent provenance payload for downstream display."""
-    return {
-        "tool": tool_name,
-        "source_tables": source_tables,
-        "filters": filters or [],
-        "notes": notes or [],
-    }
-
-
 # ---------------------------------------------------------------------------
 # Public query functions
 # ---------------------------------------------------------------------------
@@ -251,91 +201,8 @@ def search_donors(
             f"Found {count} contact(s) matching the applied filters, "
             f"sorted by {sort_by} ({sort_order.lower()})."
         )
-    applied_filters: list[dict] = []
-    if state is not None:
-        applied_filters.append(_filter_provenance("state", "=", state.upper()))
-    if city is not None:
-        applied_filters.append(
-            _filter_provenance("city", "contains", city, f"city contains '{city}'")
-        )
-    if zip_prefix is not None:
-        applied_filters.append(
-            _filter_provenance("zip_code", "starts_with", zip_prefix, f"zip_code starts with '{zip_prefix}'")
-        )
-    if donor_status is not None:
-        applied_filters.append(_filter_provenance("donor_status", "=", donor_status))
-    if min_total_gifts is not None:
-        applied_filters.append(_filter_provenance("total_gifts", ">=", min_total_gifts))
-    if max_total_gifts is not None:
-        applied_filters.append(_filter_provenance("total_gifts", "<=", max_total_gifts))
-    if min_gift_count is not None:
-        applied_filters.append(
-            _filter_provenance("total_number_of_gifts", ">=", min_gift_count)
-        )
-    if subscription_type is not None:
-        applied_filters.append(_filter_provenance("subscription_type", "=", subscription_type))
-    if subscription_status is not None:
-        applied_filters.append(_filter_provenance("subscription_status", "=", subscription_status))
-    if min_wealth_score is not None:
-        applied_filters.append(_filter_provenance("wealth_score", ">=", min_wealth_score))
-    if last_gift_before is not None:
-        applied_filters.append(_filter_provenance("last_gift_date", "<", last_gift_before))
-    if last_gift_after is not None:
-        applied_filters.append(_filter_provenance("last_gift_date", ">", last_gift_after))
-    if min_email_open_rate is not None:
-        applied_filters.append(
-            _filter_provenance("email_open_rate", ">=", min_email_open_rate)
-        )
-    if has_attended_events is True:
-        applied_filters.append(
-            _filter_provenance(
-                "event_attendance_count",
-                ">",
-                0,
-                "event_attendance_count > 0",
-            )
-        )
-    elif has_attended_events is False:
-        applied_filters.append(
-            _filter_provenance(
-                "event_attendance_count",
-                "=",
-                0,
-                "event_attendance_count = 0 or NULL",
-            )
-        )
-    if giving_vehicle is not None:
-        applied_filters.append(_filter_provenance("giving_vehicle", "=", giving_vehicle))
 
-    provenance = _build_provenance(
-        tool_name="search_donors",
-        source_tables=[
-            _table_provenance(
-                "contacts",
-                [
-                    "contact_id", "first_name", "last_name", "email",
-                    "city", "state", "zip_code", "donor_status",
-                    "first_gift_date", "last_gift_date", "total_gifts",
-                    "total_number_of_gifts", "average_gift", "giving_vehicle",
-                    "subscription_type", "subscription_status",
-                    "email_open_rate", "event_attendance_count",
-                    "wealth_score",
-                ],
-            )
-        ],
-        filters=applied_filters,
-        notes=[
-            f"Sorted by {sort_by} ({sort_order.lower()}).",
-            f"Limited to {limit} row(s).",
-        ],
-    )
-
-    return {
-        "results": results,
-        "count": count,
-        "summary": summary,
-        "provenance": provenance,
-    }
+    return {"results": results, "count": count, "summary": summary}
 
 
 def get_donor_detail(contact_id: str) -> dict:
@@ -351,19 +218,10 @@ def get_donor_detail(contact_id: str) -> dict:
         ).fetchone()
 
         if contact_row is None:
-            provenance = _build_provenance(
-                tool_name="get_donor_detail",
-                source_tables=[
-                    _table_provenance("contacts", ["contact_id"])
-                ],
-                filters=[_filter_provenance("contact_id", "=", contact_id)],
-                notes=["No matching contact row was found."],
-            )
             return {
                 "results": [],
                 "count": 0,
                 "summary": f"No contact found with ID '{contact_id}'.",
-                "provenance": provenance,
             }
 
         contact = dict(contact_row)
@@ -398,32 +256,8 @@ def get_donor_detail(contact_id: str) -> dict:
         f"Includes {len(contact['gifts'])} recent gift(s) and "
         f"{len(contact['interactions'])} recent interaction(s)."
     )
-    provenance = _build_provenance(
-        tool_name="get_donor_detail",
-        source_tables=[
-            _table_provenance("contacts", list(contact.keys())),
-            _table_provenance(
-                "gifts",
-                ["gift_id", "gift_date", "amount", "gift_type", "campaign"],
-            ),
-            _table_provenance(
-                "interactions",
-                ["interaction_id", "interaction_date", "interaction_type", "details"],
-            ),
-        ],
-        filters=[_filter_provenance("contact_id", "=", contact_id)],
-        notes=[
-            "Gift history limited to the 10 most recent rows.",
-            "Interaction history limited to the 5 most recent rows.",
-        ],
-    )
 
-    return {
-        "results": [contact],
-        "count": 1,
-        "summary": summary,
-        "provenance": provenance,
-    }
+    return {"results": [contact], "count": 1, "summary": summary}
 
 
 def get_summary_statistics(
@@ -481,17 +315,6 @@ def get_summary_statistics(
                 f"Summary statistics grouped by '{group_by}' — "
                 f"{count} group(s) returned."
             )
-            provenance_notes = [
-                f"Aggregated by {group_by}.",
-                "Ordered by total_giving descending.",
-            ]
-            provenance_fields = [
-                group_by,
-                "donor_status",
-                "total_gifts",
-                "wealth_score",
-                "email_open_rate",
-            ]
         else:
             # Overall aggregate statistics (single-row result)
             sql = f"""
@@ -520,33 +343,8 @@ def get_summary_statistics(
                 if filter_state:
                     parts.append(f"state={filter_state}")
                 summary += f" Filtered by: {', '.join(parts)}."
-            provenance_notes = ["Overall aggregate summary across matching contacts."]
-            provenance_fields = [
-                "donor_status",
-                "total_gifts",
-                "wealth_score",
-                "email_open_rate",
-            ]
 
-    applied_filters: list[dict] = []
-    if filter_status is not None:
-        applied_filters.append(_filter_provenance("donor_status", "=", filter_status))
-    if filter_state is not None:
-        applied_filters.append(_filter_provenance("state", "=", filter_state.upper()))
-
-    provenance = _build_provenance(
-        tool_name="get_summary_statistics",
-        source_tables=[_table_provenance("contacts", provenance_fields)],
-        filters=applied_filters,
-        notes=provenance_notes,
-    )
-
-    return {
-        "results": results,
-        "count": count,
-        "summary": summary,
-        "provenance": provenance,
-    }
+    return {"results": results, "count": count, "summary": summary}
 
 
 def get_geographic_distribution(
@@ -607,31 +405,8 @@ def get_geographic_distribution(
             f"Top state by donor count: {results[0]['state']} "
             f"({results[0]['donor_count']} contact(s))."
         )
-    applied_filters: list[dict] = []
-    if min_total_gifts is not None:
-        applied_filters.append(_filter_provenance("total_gifts", ">=", min_total_gifts))
-    if donor_status is not None:
-        applied_filters.append(_filter_provenance("donor_status", "=", donor_status))
 
-    provenance = _build_provenance(
-        tool_name="get_geographic_distribution",
-        source_tables=[
-            _table_provenance("contacts", ["state", "donor_status", "total_gifts"])
-        ],
-        filters=applied_filters,
-        notes=[
-            "Aggregated by state.",
-            "Ordered by donor_count descending.",
-            f"Limited to top {int(top_n)} state(s).",
-        ],
-    )
-
-    return {
-        "results": results,
-        "count": count,
-        "summary": summary,
-        "provenance": provenance,
-    }
+    return {"results": results, "count": count, "summary": summary}
 
 
 def get_lapsed_donors(
@@ -700,43 +475,8 @@ def get_lapsed_donors(
             f"Found {count} lapsed donor(s) whose last gift was more than "
             f"{months_since_last_gift} months ago, sorted by lifetime giving."
         )
-    applied_filters = [
-        _filter_provenance("last_gift_date", "<", cutoff_date),
-        _filter_provenance("total_number_of_gifts", ">", 0),
-    ]
-    if min_previous_total is not None:
-        applied_filters.append(_filter_provenance("total_gifts", ">=", min_previous_total))
-    if state is not None:
-        applied_filters.append(_filter_provenance("state", "=", state.upper()))
 
-    provenance = _build_provenance(
-        tool_name="get_lapsed_donors",
-        source_tables=[
-            _table_provenance(
-                "contacts",
-                [
-                    "contact_id", "first_name", "last_name", "email",
-                    "city", "state", "zip_code", "donor_status",
-                    "last_gift_date", "first_gift_date", "total_gifts",
-                    "total_number_of_gifts", "average_gift", "wealth_score",
-                    "email_open_rate", "subscription_status",
-                ],
-            )
-        ],
-        filters=applied_filters,
-        notes=[
-            f"Lapsed window set to more than {months_since_last_gift} month(s) since last gift.",
-            "Ordered by total_gifts descending.",
-            f"Limited to {int(limit)} row(s).",
-        ],
-    )
-
-    return {
-        "results": results,
-        "count": count,
-        "summary": summary,
-        "provenance": provenance,
-    }
+    return {"results": results, "count": count, "summary": summary}
 
 
 def get_prospects_by_potential(
@@ -821,67 +561,8 @@ def get_prospects_by_potential(
             f"Found {count} prospect(s) ranked by composite engagement "
             f"(wealth + email open rate)."
         )
-    applied_filters = [_filter_provenance("donor_status", "=", "prospect")]
-    if has_subscription is True:
-        applied_filters.append(_filter_provenance("subscription_status", "=", "active"))
-    elif has_subscription is False:
-        applied_filters.append(
-            _filter_provenance("subscription_status", "!=", "active")
-        )
-    if min_wealth_score is not None:
-        applied_filters.append(_filter_provenance("wealth_score", ">=", min_wealth_score))
-    if min_email_open_rate is not None:
-        applied_filters.append(
-            _filter_provenance("email_open_rate", ">=", min_email_open_rate)
-        )
-    if has_attended_events is True:
-        applied_filters.append(
-            _filter_provenance(
-                "event_attendance_count",
-                ">",
-                0,
-                "event_attendance_count > 0",
-            )
-        )
-    elif has_attended_events is False:
-        applied_filters.append(
-            _filter_provenance(
-                "event_attendance_count",
-                "=",
-                0,
-                "event_attendance_count = 0 or NULL",
-            )
-        )
-    if state is not None:
-        applied_filters.append(_filter_provenance("state", "=", state.upper()))
 
-    provenance = _build_provenance(
-        tool_name="get_prospects_by_potential",
-        source_tables=[
-            _table_provenance(
-                "contacts",
-                [
-                    "contact_id", "first_name", "last_name", "email",
-                    "city", "state", "zip_code", "donor_status",
-                    "subscription_type", "subscription_status",
-                    "email_open_rate", "event_attendance_count",
-                    "wealth_score", "last_email_click_date",
-                ],
-            )
-        ],
-        filters=applied_filters,
-        notes=[
-            "Ranked by a composite engagement score using wealth_score and email_open_rate.",
-            f"Limited to {int(limit)} row(s).",
-        ],
-    )
-
-    return {
-        "results": results,
-        "count": count,
-        "summary": summary,
-        "provenance": provenance,
-    }
+    return {"results": results, "count": count, "summary": summary}
 
 
 def plan_fundraising_trip(
@@ -918,11 +599,6 @@ def plan_fundraising_trip(
     limit : number of contacts to return (default 10)
     """
     if not (target_city or target_state or target_zip_prefix):
-        provenance = _build_provenance(
-            tool_name="plan_fundraising_trip",
-            source_tables=[],
-            notes=["No query was run because no geographic filter was provided."],
-        )
         return {
             "results": [],
             "count": 0,
@@ -930,7 +606,6 @@ def plan_fundraising_trip(
                 "Please specify at least one geographic filter: "
                 "target_city, target_state, or target_zip_prefix."
             ),
-            "provenance": provenance,
         }
 
     conditions: list[str] = []
@@ -987,44 +662,10 @@ def plan_fundraising_trip(
         location_desc = " / ".join(
             filter(None, [target_city, target_state, target_zip_prefix])
         )
-        applied_filters: list[dict] = []
-        if target_state is not None:
-            applied_filters.append(_filter_provenance("state", "=", target_state.upper()))
-        if target_city is not None:
-            applied_filters.append(
-                _filter_provenance("city", "contains", target_city, f"city contains '{target_city}'")
-            )
-        if target_zip_prefix is not None:
-            applied_filters.append(
-                _filter_provenance(
-                    "zip_code",
-                    "starts_with",
-                    target_zip_prefix,
-                    f"zip_code starts with '{target_zip_prefix}'",
-                )
-            )
         return {
             "results": [],
             "count": 0,
             "summary": f"No contacts found in the target area: {location_desc}.",
-            "provenance": _build_provenance(
-                tool_name="plan_fundraising_trip",
-                source_tables=[
-                    _table_provenance(
-                        "contacts",
-                        [
-                            "contact_id", "first_name", "last_name", "email",
-                            "city", "state", "zip_code", "donor_status",
-                            "first_gift_date", "last_gift_date", "total_gifts",
-                            "total_number_of_gifts", "average_gift", "wealth_score",
-                            "email_open_rate", "event_attendance_count",
-                            "subscription_status", "giving_vehicle",
-                        ],
-                    )
-                ],
-                filters=applied_filters,
-                notes=["No candidates matched the requested geography."],
-            ),
         }
 
     # ------------------------------------------------------------------
@@ -1117,72 +758,5 @@ def plan_fundraising_trip(
         f"{location_desc}, ranked by composite score (giving history, "
         f"wealth, recency, engagement, subscription)."
     )
-    included_statuses: list[str] = []
-    if include_lapsed:
-        included_statuses.append("lapsed")
-    if include_prospects:
-        included_statuses.append("prospect")
-    included_statuses.extend(["active", "new_donor"])
 
-    applied_filters: list[dict] = []
-    if target_state is not None:
-        applied_filters.append(_filter_provenance("state", "=", target_state.upper()))
-    if target_city is not None:
-        applied_filters.append(
-            _filter_provenance("city", "contains", target_city, f"city contains '{target_city}'")
-        )
-    if target_zip_prefix is not None:
-        applied_filters.append(
-            _filter_provenance(
-                "zip_code",
-                "starts_with",
-                target_zip_prefix,
-                f"zip_code starts with '{target_zip_prefix}'",
-            )
-        )
-    if min_total_gifts is not None:
-        applied_filters.append(
-            _filter_provenance(
-                "total_gifts",
-                ">=",
-                min_total_gifts,
-                f"total_gifts >= {min_total_gifts} for donors; prospects allowed through",
-            )
-        )
-    applied_filters.append(
-        _filter_provenance(
-            "donor_status",
-            "IN",
-            included_statuses,
-            f"donor_status in {', '.join(included_statuses)}",
-        )
-    )
-
-    provenance = _build_provenance(
-        tool_name="plan_fundraising_trip",
-        source_tables=[
-            _table_provenance(
-                "contacts",
-                [
-                    "contact_id", "first_name", "last_name", "email",
-                    "city", "state", "zip_code", "donor_status",
-                    "first_gift_date", "last_gift_date", "total_gifts",
-                    "total_number_of_gifts", "average_gift", "wealth_score",
-                    "email_open_rate", "event_attendance_count",
-                    "subscription_status", "giving_vehicle",
-                ],
-            )
-        ],
-        filters=applied_filters,
-        notes=[
-            "Ranked by a composite score using giving history, wealth, recency, engagement, and subscription.",
-            f"Limited to top {int(limit)} contact(s).",
-        ],
-    )
-
-    return {
-        "results": results,
-        "count": count,
-        "summary": summary,
-        "provenance": provenance,
-    }
+    return {"results": results, "count": count, "summary": summary}

@@ -45,7 +45,7 @@ from token_tracker import SessionTracker
 def run_query(question: str) -> str:
     """Run a single question through the full pipeline and return the response text."""
     tracker = SessionTracker()
-    response_text, _usage, _provenance = get_response(
+    response_text, _usage = get_response(
         user_message=question,
         conversation_history=[],
         session_tracker=tracker,
@@ -224,7 +224,7 @@ class TestEdgeCases:
         tracker = SessionTracker()
         # First turn
         first_q = "Who are our top 3 donors?"
-        first_response, _usage, _provenance = get_response(
+        first_response, _usage = get_response(
             user_message=first_q,
             conversation_history=[],
             session_tracker=tracker,
@@ -236,7 +236,7 @@ class TestEdgeCases:
         ]
         # Second turn — follow-up
         follow_up = "Where do each of them live?"
-        follow_up_response, _usage2, _provenance2 = get_response(
+        follow_up_response, _usage2 = get_response(
             user_message=follow_up,
             conversation_history=history,
             session_tracker=tracker,
