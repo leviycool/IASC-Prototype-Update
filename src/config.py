@@ -98,6 +98,12 @@ except Exception:
 # Tool use limits
 MAX_TOOL_CALLS_PER_TURN = 5  # prevent infinite loops
 MAX_RESULTS_PER_QUERY = 20   # default limit for search results
+LLM_TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", "0"))
+RESPONSE_CACHE_ENABLED = os.environ.get("RESPONSE_CACHE_ENABLED", "1").lower() not in {
+    "0",
+    "false",
+    "no",
+}
 
 # UI configuration
 APP_TITLE = "IASC Donor Analytics"

@@ -183,7 +183,7 @@ def search_donors(
             email_open_rate, event_attendance_count, wealth_score
         FROM contacts
         {where_clause}
-        ORDER BY {sort_by} {sort_order}
+        ORDER BY {sort_by} {sort_order}, last_name ASC, first_name ASC, contact_id ASC
         LIMIT ?
     """
     params.append(limit)
@@ -231,7 +231,7 @@ def get_donor_detail(contact_id: str) -> dict:
             SELECT gift_id, gift_date, amount, gift_type, campaign
             FROM gifts
             WHERE contact_id = ?
-            ORDER BY gift_date DESC
+            ORDER BY gift_date DESC, gift_id DESC
             LIMIT 10
             """,
             (contact_id,),
@@ -243,7 +243,7 @@ def get_donor_detail(contact_id: str) -> dict:
             SELECT interaction_id, interaction_date, interaction_type, details
             FROM interactions
             WHERE contact_id = ?
-            ORDER BY interaction_date DESC
+            ORDER BY interaction_date DESC, interaction_id DESC
             LIMIT 5
             """,
             (contact_id,),
@@ -306,7 +306,7 @@ def get_summary_statistics(
                 FROM contacts
                 {where_clause}
                 GROUP BY {group_by}
-                ORDER BY total_giving DESC
+                ORDER BY total_giving DESC, group_value ASC
             """
             rows = conn.execute(sql, params).fetchall()
             results = _rows_to_dicts(rows)
@@ -387,7 +387,7 @@ def get_geographic_distribution(
         FROM contacts
         {where_clause}
         GROUP BY state
-        ORDER BY donor_count DESC
+        ORDER BY donor_count DESC, state ASC
         LIMIT ?
     """
 
@@ -455,7 +455,7 @@ def get_lapsed_donors(
             wealth_score, email_open_rate, subscription_status
         FROM contacts
         WHERE {" AND ".join(conditions)}
-        ORDER BY total_gifts DESC
+        ORDER BY total_gifts DESC, last_gift_date DESC, last_name ASC, first_name ASC, contact_id ASC
         LIMIT ?
     """
 
@@ -544,7 +544,10 @@ def get_prospects_by_potential(
         WHERE {" AND ".join(conditions)}
         ORDER BY
             (COALESCE(wealth_score, 5) / 10.0) * 0.5
-            + COALESCE(email_open_rate, 0) * 0.5 DESC
+            + COALESCE(email_open_rate, 0) * 0.5 DESC,
+            last_name ASC,
+            first_name ASC,
+            contact_id ASC
         LIMIT ?
     """
 
@@ -746,7 +749,14 @@ def plan_fundraising_trip(
         )
 
     # Sort descending by score, then slice to limit
-    candidates.sort(key=lambda x: x["score"], reverse=True)
+    candidates.sort(
+        key=lambda x: (
+            -(x.get("score") or 0.0),
+            x.get("last_name") or "",
+            x.get("first_name") or "",
+            x.get("contact_id") or "",
+        )
+    )
     results = candidates[:limit]
     count = len(results)
 

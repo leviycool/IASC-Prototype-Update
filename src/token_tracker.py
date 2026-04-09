@@ -61,6 +61,7 @@ class ResponseUsage:
     """Aggregated usage for one user question (may involve multiple API calls)."""
     question: str
     calls: list = field(default_factory=list)
+    cache_hit: bool = False
 
     @property
     def total_input_tokens(self) -> int:
@@ -121,6 +122,8 @@ class ResponseUsage:
 
     def format_inline(self, model: str | None = None) -> str:
         """Format for display below a chat response."""
+        if self.cache_hit and not self.calls:
+            return "Stats: cached response reused | 0 API call(s) | $0.0000"
         cost = self.estimated_cost(model)
         models_used = [c.model for c in self.calls if c.model]
         unique_models = list(dict.fromkeys(models_used))

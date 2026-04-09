@@ -198,6 +198,13 @@ class TestSearchDonors:
         result = search_donors(sort_by="DROP TABLE contacts; --", limit=5)
         assert "results" in result
 
+    def test_repeated_calls_return_same_order(self):
+        first = search_donors(sort_by="total_gifts", sort_order="desc", limit=15)
+        second = search_donors(sort_by="total_gifts", sort_order="desc", limit=15)
+        first_ids = [row["contact_id"] for row in first["results"]]
+        second_ids = [row["contact_id"] for row in second["results"]]
+        assert first_ids == second_ids
+
 
 # ===========================================================================
 # TestLapsedDonors
@@ -329,6 +336,13 @@ class TestFundraisingTrip:
         scores2 = [r["score"] for r in result2["results"]]
         assert scores1 == scores2, "Scores should be deterministic for the same input"
 
+    def test_result_order_is_deterministic(self):
+        result1 = plan_fundraising_trip(target_state="VA", limit=10)
+        result2 = plan_fundraising_trip(target_state="VA", limit=10)
+        ids1 = [r["contact_id"] for r in result1["results"]]
+        ids2 = [r["contact_id"] for r in result2["results"]]
+        assert ids1 == ids2, "Ranked contact order should be deterministic"
+
 
 # ===========================================================================
 # TestSummaryStatistics
@@ -433,6 +447,13 @@ class TestGeographicDistribution:
         result = get_geographic_distribution(donor_status="active")
         assert result["count"] > 0
 
+    def test_repeated_calls_return_same_state_order(self):
+        first = get_geographic_distribution(top_n=10)
+        second = get_geographic_distribution(top_n=10)
+        first_states = [row["state"] for row in first["results"]]
+        second_states = [row["state"] for row in second["results"]]
+        assert first_states == second_states
+
 
 # ===========================================================================
 # TestProspectsByPotential
@@ -484,6 +505,13 @@ class TestProspectsByPotential:
     def test_limit_respected(self):
         result = get_prospects_by_potential(limit=3)
         assert len(result["results"]) <= 3
+
+    def test_repeated_calls_return_same_order(self):
+        first = get_prospects_by_potential(limit=10)
+        second = get_prospects_by_potential(limit=10)
+        first_ids = [row["contact_id"] for row in first["results"]]
+        second_ids = [row["contact_id"] for row in second["results"]]
+        assert first_ids == second_ids
 
     def test_result_rows_contain_expected_fields(self):
         result = get_prospects_by_potential(limit=1)

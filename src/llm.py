@@ -7,6 +7,7 @@ environments configured with OpenAI models.
 """
 
 import json
+import hashlib
 import re
 import sys
 import time
@@ -37,7 +38,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 import queries
 from config import (
     DEFAULT_MODEL,
+    LLM_TEMPERATURE,
     MAX_TOOL_CALLS_PER_TURN,
+    RESPONSE_CACHE_ENABLED,
     get_api_key_for_provider,
     get_base_url_for_provider,
 )
@@ -46,6 +49,7 @@ from prompts import (
     build_system_prompt_text,
     needs_knowledge_base,
 )
+from response_cache import get_cached_response, put_cached_response
 from token_tracker import APICall, ResponseUsage, SessionTracker
 from usage_store import get_usage_summary, log_api_call
 
@@ -216,6 +220,13 @@ TOOL_FUNCTIONS = {
 }
 
 MAX_RETRIES = 3
+RESPONSE_CACHE_VERSION = 1
+RESPONSE_CACHE_FINGERPRINT_PATHS = (
+    Path(__file__),
+    Path(__file__).with_name("prompts.py"),
+    Path(__file__).with_name("queries.py"),
+    Path(__file__).parent.parent / "data" / "donors.db",
+)
 
 
 def execute_tool(tool_name: str, tool_input: dict) -> str:
@@ -230,6 +241,118 @@ def execute_tool(tool_name: str, tool_input: dict) -> str:
         return json.dumps({"error": f"Invalid parameters for {tool_name}: {exc}"})
     except Exception as exc:
         return json.dumps({"error": f"Tool execution failed: {exc}"})
+
+
+def _response_cache_fingerprint() -> list[dict]:
+    """Capture the parts of local state that should invalidate cached answers."""
+    fingerprint: list[dict] = []
+    for path in RESPONSE_CACHE_FINGERPRINT_PATHS:
+        if path.exists():
+            stat = path.stat()
+            fingerprint.append(
+                {
+                    "path": str(path),
+                    "mtime_ns": stat.st_mtime_ns,
+                    "size": stat.st_size,
+                }
+            )
+        else:
+            fingerprint.append(
+                {
+                    "path": str(path),
+                    "missing": True,
+                }
+            )
+    return fingerprint
+
+
+def _build_response_cache_key(
+    provider: str,
+    model: str,
+    system_prompt,
+    user_message: str,
+    conversation_history: list[dict],
+) -> str:
+    """Hash the effective request so identical inputs can reuse exact answers."""
+    payload = {
+        "version": RESPONSE_CACHE_VERSION,
+        "provider": provider,
+        "model": model,
+        "system_prompt": system_prompt,
+        "user_message": user_message.strip(),
+        "conversation_history": conversation_history,
+        "current_date": datetime.now().date().isoformat(),
+        "fingerprint": _response_cache_fingerprint(),
+    }
+    payload_json = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+
+
+def _extract_summary_sentence(text: str) -> str:
+    """Build a short one-line summary from the leading content."""
+    cleaned_lines = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        line = re.sub(r"^[-*]\s+", "", line)
+        line = re.sub(r"^\d+\.\s+", "", line)
+        if line:
+            cleaned_lines.append(line)
+        if len(" ".join(cleaned_lines)) >= 220:
+            break
+
+    candidate = " ".join(cleaned_lines)
+    if not candidate:
+        return "TL;DR: Answer generated."
+
+    sentence_match = re.match(r"(.{20,220}?[.!?])(?:\s|$)", candidate)
+    if sentence_match:
+        summary = sentence_match.group(1).strip()
+    elif len(candidate) <= 180:
+        summary = candidate
+    else:
+        summary = candidate[:177].rsplit(" ", 1)[0].strip() + "..."
+
+    return f"TL;DR: {summary}"
+
+
+def _format_final_response(final_text: str) -> str:
+    """Keep answers scannable, adding a TL;DR to long responses when needed."""
+    text = final_text.strip()
+    if not text:
+        return text
+
+    text = re.sub(r"\n{3,}", "\n\n", text)
+
+    if re.match(r"(?is)^tl;dr:", text):
+        return text
+
+    word_count = len(re.findall(r"\b\w+\b", text))
+    non_empty_lines = [line for line in text.splitlines() if line.strip()]
+    if word_count < 100 and len(non_empty_lines) <= 6 and len(text) < 550:
+        return text
+
+    return f"{_extract_summary_sentence(text)}\n\n{text}"
+
+
+def _maybe_get_cached_response(
+    cache_key: str,
+    response_usage: ResponseUsage,
+    progress_callback: Optional[Callable[[str], None]],
+) -> Optional[tuple[str, ResponseUsage]]:
+    """Return a cached exact-match response when caching is enabled."""
+    if not RESPONSE_CACHE_ENABLED:
+        return None
+
+    cached_response = get_cached_response(cache_key)
+    if cached_response is None:
+        return None
+
+    response_usage.cache_hit = True
+    if progress_callback:
+        progress_callback("Reusing cached answer...")
+    return cached_response, response_usage
 
 
 def _summarize_tool_params(tool_name: str, params: dict) -> str:
@@ -346,11 +469,23 @@ def _get_claude_response(
     )
     messages = conversation_history + [{"role": "user", "content": user_message}]
     response_usage = ResponseUsage(question=user_message)
+    cache_key = _build_response_cache_key(
+        provider="claude",
+        model=model,
+        system_prompt=system_prompt,
+        user_message=user_message,
+        conversation_history=conversation_history,
+    )
     tool_call_count = 0
 
     def update_progress(message: str) -> None:
         if progress_callback:
             progress_callback(_normalize_progress_message(message))
+
+    cached_result = _maybe_get_cached_response(cache_key, response_usage, progress_callback)
+    if cached_result is not None:
+        cached_text, cached_usage = cached_result
+        return _finalize_response(cached_text, cached_usage, session_tracker)
 
     if include_kb:
         update_progress("Loading fundraising knowledge base...")
@@ -365,6 +500,7 @@ def _get_claude_response(
                 response = client.messages.create(
                     model=model,
                     max_tokens=4096,
+                    temperature=LLM_TEMPERATURE,
                     system=system_prompt,
                     tools=TOOLS,
                     messages=messages,
@@ -397,6 +533,9 @@ def _get_claude_response(
         if response.stop_reason == "end_turn" or not had_tool_use:
             text_blocks = [block.text for block in response.content if hasattr(block, "text")]
             final_text = "\n".join(text_blocks) if text_blocks else "(No response generated)"
+            final_text = _format_final_response(final_text)
+            if RESPONSE_CACHE_ENABLED:
+                put_cached_response(cache_key, "claude", model, final_text)
             return _finalize_response(final_text, response_usage, session_tracker)
 
         tool_results = []
@@ -453,12 +592,24 @@ def _get_openai_response(
     messages.extend(conversation_history)
     messages.append({"role": "user", "content": user_message})
     response_usage = ResponseUsage(question=user_message)
+    cache_key = _build_response_cache_key(
+        provider="openai",
+        model=model,
+        system_prompt=system_prompt,
+        user_message=user_message,
+        conversation_history=conversation_history,
+    )
     tool_call_count = 0
     openai_tools = _openai_tools()
 
     def update_progress(message: str) -> None:
         if progress_callback:
             progress_callback(_normalize_progress_message(message))
+
+    cached_result = _maybe_get_cached_response(cache_key, response_usage, progress_callback)
+    if cached_result is not None:
+        cached_text, cached_usage = cached_result
+        return _finalize_response(cached_text, cached_usage, session_tracker)
 
     if include_kb:
         update_progress("Loading fundraising knowledge base...")
@@ -473,6 +624,7 @@ def _get_openai_response(
                 response = client.chat.completions.create(
                     model=model,
                     max_tokens=4096,
+                    temperature=LLM_TEMPERATURE,
                     messages=messages,
                     tools=openai_tools,
                     tool_choice="auto",
@@ -513,6 +665,9 @@ def _get_openai_response(
 
         if not tool_calls:
             final_text = message.content or "(No response generated)"
+            final_text = _format_final_response(final_text)
+            if RESPONSE_CACHE_ENABLED:
+                put_cached_response(cache_key, "openai", model, final_text)
             return _finalize_response(final_text, response_usage, session_tracker)
 
         messages.append(message.model_dump(exclude_none=True))
