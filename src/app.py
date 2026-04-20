@@ -62,6 +62,16 @@ from config import (
 from llm import get_response
 from token_tracker import SessionTracker
 from knowledge import get_knowledge_token_estimate
+from task_memory import (
+    classify_user_message,
+    format_task_context_markdown,
+    has_active_task,
+    initialize_task_memory,
+    reset_task_memory,
+    summarize_task_scope,
+    update_task_memory,
+    update_task_memory_from_response,
+)
 
 # ─── Page configuration ───────────────────────────────────────────────────────
 
@@ -93,9 +103,21 @@ if "selected_provider" not in st.session_state:
 if "pending_question" not in st.session_state:
     st.session_state.pending_question = None
 
+if "pending_question_source" not in st.session_state:
+    st.session_state.pending_question_source = None
+
 if "session_id" not in st.session_state:
     import uuid
     st.session_state.session_id = str(uuid.uuid4())[:8]
+
+if "task_memory" not in st.session_state:
+    st.session_state.task_memory = initialize_task_memory()
+
+if "current_turn_type" not in st.session_state:
+    st.session_state.current_turn_type = None
+
+if "last_response_used_context" not in st.session_state:
+    st.session_state.last_response_used_context = False
 
 # ─── Sidebar ─────────────────────────────────────────────────────────────────
 
@@ -161,13 +183,29 @@ with st.sidebar:
     for q in sample_questions:
         if st.button(q, key=f"sample_{hash(q)}", use_container_width=True):
             st.session_state.pending_question = q
+            st.session_state.pending_question_source = "sample_question"
             st.rerun()
+
+    st.divider()
+
+    st.subheader("Current Task Context")
+    task_context_markdown = format_task_context_markdown(st.session_state.task_memory)
+    if has_active_task(st.session_state.task_memory):
+        st.markdown(task_context_markdown)
+    else:
+        st.caption(task_context_markdown)
 
     st.divider()
 
     # Session usage summary
     st.subheader("Session usage")
-    st.markdown(st.session_state.tracker.format_sidebar())
+    session_usage_summary = st.session_state.tracker.format_sidebar()
+    session_usage_summary += (
+        f"- Current task id: {st.session_state.task_memory.get('task_id') or 'None'}\n"
+        f"- Memory active: {'Yes' if st.session_state.task_memory.get('memory_active') else 'No'}\n"
+        f"- Current turn type: {st.session_state.current_turn_type or 'None'}\n"
+    )
+    st.markdown(session_usage_summary)
 
     st.divider()
 
@@ -223,6 +261,11 @@ with st.sidebar:
     if st.button("Clear conversation", use_container_width=True):
         st.session_state.messages = []
         st.session_state.tracker = SessionTracker()
+        st.session_state.task_memory = reset_task_memory()
+        st.session_state.pending_question = None
+        st.session_state.pending_question_source = None
+        st.session_state.current_turn_type = None
+        st.session_state.last_response_used_context = False
         st.rerun()
 
 # ─── Main chat area ────────────────────────────────────────────────────────────
@@ -238,6 +281,20 @@ st.warning(
     icon="⚠️",
 )
 
+active_dataset_label = (
+    f"Synthetic donor database ({DB_PATH.name})"
+    if DB_PATH.exists()
+    else "Synthetic donor CSV/bootstrap data"
+)
+with st.container():
+    st.caption("Current analysis context")
+    st.markdown(
+        f"- Active dataset/source: {active_dataset_label}\n"
+        f"- Current scope/filter: {summarize_task_scope(st.session_state.task_memory)}\n"
+        f"- Task memory active: {'Yes' if st.session_state.task_memory.get('memory_active') else 'No'}\n"
+        f"- Prior-turn context reused: {'Yes' if st.session_state.last_response_used_context else 'No'}\n"
+    )
+
 # Render the full conversation history
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
@@ -250,6 +307,7 @@ for msg in st.session_state.messages:
 
 # The chat_input widget always renders at the bottom of the page
 user_input = st.chat_input("Ask a question about your donors...")
+user_input_source = "chat"
 
 # If a sidebar sample question was clicked on the previous run, use it now.
 # We only consume pending_question when there is no direct chat_input (the user
@@ -257,9 +315,33 @@ user_input = st.chat_input("Ask a question about your donors...")
 # we guard for it anyway).
 if st.session_state.pending_question and not user_input:
     user_input = st.session_state.pending_question
+    user_input_source = st.session_state.pending_question_source or "sample_question"
     st.session_state.pending_question = None
+    st.session_state.pending_question_source = None
 
 if user_input:
+    turn_index = sum(1 for msg in st.session_state.messages if msg["role"] == "user") + 1
+    turn_type = classify_user_message(
+        user_input,
+        st.session_state.task_memory,
+        st.session_state.messages,
+        is_sample_question=(user_input_source == "sample_question"),
+    )
+    use_prior_context = has_active_task(st.session_state.task_memory) and turn_type in {
+        "follow_up",
+        "refinement",
+        "explanation",
+        "continuation",
+    }
+    st.session_state.task_memory = update_task_memory(
+        user_input,
+        turn_type,
+        st.session_state.task_memory,
+        turn_index,
+    )
+    st.session_state.current_turn_type = turn_type
+    st.session_state.last_response_used_context = use_prior_context
+
     # Immediately display the user's message
     with st.chat_message("user"):
         st.markdown(user_input)
@@ -286,6 +368,9 @@ if user_input:
                     session_tracker=st.session_state.tracker,
                     progress_callback=lambda msg: status.update(label=msg),
                     st_session_id=st.session_state.session_id,
+                    task_state=st.session_state.task_memory,
+                    turn_type=turn_type,
+                    use_prior_context=use_prior_context,
                 )
                 status.update(label="Done", state="complete", expanded=False)
             except Exception as e:
@@ -302,6 +387,10 @@ if user_input:
         st.markdown(response_text)
         if response_usage is not None:
             st.caption(response_usage.format_inline(st.session_state.selected_model))
+            st.session_state.task_memory = update_task_memory_from_response(
+                response_text,
+                st.session_state.task_memory,
+            )
 
     # Persist the assistant message with usage metadata for the next render
     st.session_state.messages.append({

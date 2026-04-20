@@ -49,6 +49,7 @@ from prompts import (
     build_system_prompt_text,
     needs_knowledge_base,
 )
+from task_memory import build_contextual_prompt
 from response_cache import get_cached_response, put_cached_response
 from token_tracker import APICall, ResponseUsage, SessionTracker
 from usage_store import get_usage_summary, log_api_call
@@ -396,6 +397,16 @@ def _finalize_response(
     return final_text, response_usage
 
 
+def _should_include_knowledge_base(
+    user_message: str,
+    task_state: Optional[dict],
+) -> bool:
+    """Decide whether to include the fundraising best-practices knowledge base."""
+    if needs_knowledge_base(user_message):
+        return True
+    return (task_state or {}).get("task_type") == "strategy_guidance"
+
+
 def _get_claude_response(
     user_message: str,
     conversation_history: list[dict],
@@ -403,6 +414,9 @@ def _get_claude_response(
     session_tracker: Optional[SessionTracker],
     progress_callback: Optional[Callable[[str], None]],
     st_session_id: Optional[str],
+    task_state: Optional[dict],
+    turn_type: Optional[str],
+    use_prior_context: bool,
 ) -> tuple[str, ResponseUsage]:
     if anthropic is None:
         raise RuntimeError(
@@ -414,18 +428,25 @@ def _get_claude_response(
         raise RuntimeError("Missing ANTHROPIC_API_KEY for the Claude backend.")
 
     client = anthropic.Anthropic(api_key=api_key)
-    include_kb = needs_knowledge_base(user_message)
+    include_kb = _should_include_knowledge_base(user_message, task_state)
     system_prompt = build_system_prompt(
         include_knowledge=include_kb,
         provider="claude",
     )
-    messages = conversation_history + [{"role": "user", "content": user_message}]
+    effective_user_message = build_contextual_prompt(
+        message=user_message,
+        task_state=task_state,
+        chat_history=conversation_history,
+        turn_type=turn_type,
+        use_prior_context=use_prior_context,
+    )
+    messages = conversation_history + [{"role": "user", "content": effective_user_message}]
     response_usage = ResponseUsage(question=user_message)
     cache_key = _build_response_cache_key(
         provider="claude",
         model=model,
         system_prompt=system_prompt,
-        user_message=user_message,
+        user_message=effective_user_message,
         conversation_history=conversation_history,
     )
     tool_call_count = 0
@@ -523,6 +544,9 @@ def _get_openai_response(
     session_tracker: Optional[SessionTracker],
     progress_callback: Optional[Callable[[str], None]],
     st_session_id: Optional[str],
+    task_state: Optional[dict],
+    turn_type: Optional[str],
+    use_prior_context: bool,
 ) -> tuple[str, ResponseUsage]:
     if OpenAI is None:
         raise RuntimeError(
@@ -534,20 +558,27 @@ def _get_openai_response(
         raise RuntimeError("Missing OPENAI_API_KEY for the OpenAI backend.")
     base_url = get_base_url_for_provider("openai")
     client = _build_openai_client(api_key, base_url)
-    include_kb = needs_knowledge_base(user_message)
+    include_kb = _should_include_knowledge_base(user_message, task_state)
     system_prompt = build_system_prompt_text(
         include_knowledge=include_kb,
         provider="openai",
     )
+    effective_user_message = build_contextual_prompt(
+        message=user_message,
+        task_state=task_state,
+        chat_history=conversation_history,
+        turn_type=turn_type,
+        use_prior_context=use_prior_context,
+    )
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(conversation_history)
-    messages.append({"role": "user", "content": user_message})
+    messages.append({"role": "user", "content": effective_user_message})
     response_usage = ResponseUsage(question=user_message)
     cache_key = _build_response_cache_key(
         provider="openai",
         model=model,
         system_prompt=system_prompt,
-        user_message=user_message,
+        user_message=effective_user_message,
         conversation_history=conversation_history,
     )
     tool_call_count = 0
@@ -652,6 +683,9 @@ def get_response(
     session_tracker: Optional[SessionTracker] = None,
     progress_callback: Optional[Callable[[str], None]] = None,
     st_session_id: Optional[str] = None,
+    task_state: Optional[dict] = None,
+    turn_type: Optional[str] = None,
+    use_prior_context: bool = False,
 ) -> tuple[str, ResponseUsage]:
     """Send a user message through the full tool-use loop."""
     provider = _provider_for_model(model)
@@ -663,6 +697,9 @@ def get_response(
             session_tracker=session_tracker,
             progress_callback=progress_callback,
             st_session_id=st_session_id,
+            task_state=task_state,
+            turn_type=turn_type,
+            use_prior_context=use_prior_context,
         )
     return _get_claude_response(
         user_message=user_message,
@@ -671,4 +708,7 @@ def get_response(
         session_tracker=session_tracker,
         progress_callback=progress_callback,
         st_session_id=st_session_id,
+        task_state=task_state,
+        turn_type=turn_type,
+        use_prior_context=use_prior_context,
     )
