@@ -117,3 +117,113 @@ def test_session_state_ignores_malformed_usage_payloads(tmp_path, monkeypatch):
     assert restored is not None
     assert restored["messages"][0]["usage"] is None
     assert restored["tracker"].total_api_calls == 0
+
+
+def test_archive_and_restore_round_trip(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_store, "DB_PATH", tmp_path / "session_state.db")
+
+    data_source = _demo_data_source(tmp_path)
+    usage = ResponseUsage(question="Who are our top donors?")
+    usage.calls.append(
+        APICall(
+            timestamp=datetime(2026, 4, 20, 14, 0, 0),
+            input_tokens=140,
+            output_tokens=50,
+            model="gpt-4.1-mini",
+            had_tool_use=False,
+            latency_ms=620,
+        )
+    )
+    tracker = SessionTracker()
+    tracker.responses.append(usage)
+
+    session_store.save_session_state(
+        session_id="browser-archive",
+        messages=[
+            {"role": "user", "content": "Who are our top donors?", "usage": None},
+            {"role": "assistant", "content": "Here are the top donors.", "usage": usage},
+        ],
+        task_memory=sync_memory_with_data_source(initialize_task_memory(), data_source),
+        data_source=data_source,
+        tracker=tracker,
+        selected_model="gpt-4.1-mini",
+        selected_provider="openai",
+    )
+
+    archived = session_store.archive_session_state("browser-archive", title="Top donors")
+    assert archived is not None
+    assert archived["title"] == "Top donors"
+    assert archived["message_count"] == 2
+
+    session_store.save_session_state(
+        session_id="browser-archive",
+        messages=[],
+        task_memory=initialize_task_memory(),
+        data_source=data_source,
+        tracker=SessionTracker(),
+        selected_model="gpt-4.1-mini",
+        selected_provider="openai",
+    )
+
+    restored = session_store.restore_archived_conversation(
+        session_id="browser-archive",
+        archive_id=archived["archive_id"],
+    )
+
+    assert restored is not None
+    assert restored["messages"][0]["content"] == "Who are our top donors?"
+    assert restored["tracker"].total_api_calls == 1
+
+
+def test_list_archived_conversations_returns_latest_first(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_store, "DB_PATH", tmp_path / "session_state.db")
+
+    data_source = _demo_data_source(tmp_path)
+    base_tracker = SessionTracker()
+
+    session_store.save_session_state(
+        session_id="browser-list",
+        messages=[{"role": "user", "content": "First chat", "usage": None}],
+        task_memory=initialize_task_memory(),
+        data_source=data_source,
+        tracker=base_tracker,
+        selected_model="gpt-4.1-mini",
+        selected_provider="openai",
+    )
+    first = session_store.archive_session_state("browser-list", title="First archive")
+
+    session_store.save_session_state(
+        session_id="browser-list",
+        messages=[{"role": "user", "content": "Second chat", "usage": None}],
+        task_memory=initialize_task_memory(),
+        data_source=data_source,
+        tracker=base_tracker,
+        selected_model="gpt-4.1-mini",
+        selected_provider="openai",
+    )
+    second = session_store.archive_session_state("browser-list", title="Second archive")
+
+    archived = session_store.list_archived_conversations("browser-list")
+
+    assert first is not None
+    assert second is not None
+    assert archived[0]["title"] == "Second archive"
+    assert archived[1]["title"] == "First archive"
+
+
+def test_archive_session_state_returns_none_for_empty_current_conversation(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_store, "DB_PATH", tmp_path / "session_state.db")
+
+    session_store.save_session_state(
+        session_id="browser-empty",
+        messages=[],
+        task_memory=initialize_task_memory(),
+        data_source=_demo_data_source(tmp_path),
+        tracker=SessionTracker(),
+        selected_model="gpt-4.1-mini",
+        selected_provider="openai",
+    )
+
+    archived = session_store.archive_session_state("browser-empty")
+
+    assert archived is None

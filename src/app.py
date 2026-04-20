@@ -68,7 +68,13 @@ from llm import get_response
 from token_tracker import SessionTracker
 from knowledge import get_knowledge_token_estimate
 from queries import reset_active_db_path, set_active_db_path
-from session_store import load_session_state, save_session_state
+from session_store import (
+    archive_session_state,
+    list_archived_conversations,
+    load_session_state,
+    restore_archived_conversation,
+    save_session_state,
+)
 from task_memory import (
     classify_user_message,
     format_task_context_markdown,
@@ -127,9 +133,17 @@ def _ensure_browser_session_id() -> str:
 def _restore_persisted_state() -> None:
     """Load saved chat state for this browser session if available."""
     restored = load_session_state(st.session_state.session_id)
-    st.session_state.data_source_warning = None
     if restored is None:
+        st.session_state.data_source_warning = None
         return
+
+    _apply_saved_session_state(restored)
+    _persist_session_state()
+
+
+def _apply_saved_session_state(restored: dict) -> None:
+    """Apply one saved session or archive snapshot to the live Streamlit state."""
+    st.session_state.data_source_warning = None
 
     restored_data_source = restored["data_source"]
     restored_db_path = Path(restored_data_source["db_path"])
@@ -149,6 +163,8 @@ def _restore_persisted_state() -> None:
         restored["task_memory"],
         restored_data_source,
     )
+    st.session_state.current_turn_type = st.session_state.task_memory.get("last_turn_type")
+    st.session_state.last_response_used_context = False
 
 
 def _persist_session_state() -> None:
@@ -162,6 +178,21 @@ def _persist_session_state() -> None:
         selected_model=st.session_state.selected_model,
         selected_provider=st.session_state.selected_provider,
     )
+
+
+def _current_conversation_label() -> str:
+    """Build a short label for the live conversation."""
+    task_title = " ".join(str(st.session_state.task_memory.get("task_title") or "").split())
+    if task_title:
+        return task_title[:120]
+
+    for message in st.session_state.messages:
+        if message.get("role") == "user":
+            content = " ".join(str(message.get("content", "")).split())
+            if content:
+                return content[:120]
+
+    return "New conversation"
 
 # ─── Session state initialization ─────────────────────────────────────────────
 
@@ -213,6 +244,9 @@ if "last_response_used_context" not in st.session_state:
 
 if "data_source_warning" not in st.session_state:
     st.session_state.data_source_warning = None
+
+if "conversation_notice" not in st.session_state:
+    st.session_state.conversation_notice = None
 
 if "persisted_state_loaded" not in st.session_state:
     _restore_persisted_state()
@@ -390,6 +424,70 @@ with st.sidebar:
 
     st.divider()
 
+    st.subheader("Conversation")
+    st.caption("Archive the current conversation before starting a new one if you want to keep it.")
+
+    if st.session_state.conversation_notice:
+        st.info(st.session_state.conversation_notice)
+        st.session_state.conversation_notice = None
+
+    current_label = _current_conversation_label()
+    st.caption(f"Current conversation: {current_label}")
+
+    conversation_col1, conversation_col2 = st.columns(2)
+    if conversation_col1.button("New conversation", use_container_width=True):
+        _reset_conversation_state(reset_usage=True)
+        st.session_state.conversation_notice = "Started a new conversation."
+        st.rerun()
+
+    if conversation_col2.button("Archive current", use_container_width=True):
+        archived = archive_session_state(
+            st.session_state.session_id,
+            title=current_label,
+        )
+        if archived is None:
+            st.session_state.conversation_notice = "Nothing to archive yet."
+        else:
+            _reset_conversation_state(reset_usage=True)
+            st.session_state.conversation_notice = f"Archived: {archived['title']}"
+        st.rerun()
+
+    archived_conversations = list_archived_conversations(st.session_state.session_id, limit=20)
+    if archived_conversations:
+        archive_options = {
+            item["archive_id"]: item
+            for item in archived_conversations
+        }
+        selected_archive_id = st.selectbox(
+            "Archived conversations",
+            options=list(archive_options.keys()),
+            format_func=lambda archive_id: (
+                f"{archive_options[archive_id]['title']} "
+                f"({archive_options[archive_id]['message_count']} messages)"
+            ),
+        )
+        selected_archive = archive_options[selected_archive_id]
+        st.caption(
+            f"Archived {selected_archive['archived_at']} | "
+            f"{selected_archive['preview'] or 'No preview available'}"
+        )
+        if st.button("Restore selected archive", use_container_width=True):
+            restored = restore_archived_conversation(
+                session_id=st.session_state.session_id,
+                archive_id=selected_archive_id,
+            )
+            if restored is None:
+                st.session_state.conversation_notice = "Could not restore that archive."
+            else:
+                _apply_saved_session_state(restored)
+                _persist_session_state()
+                st.session_state.conversation_notice = f"Restored: {selected_archive['title']}"
+            st.rerun()
+    else:
+        st.caption("No archived conversations yet.")
+
+    st.divider()
+
     # Session usage summary
     st.subheader("Session usage")
     session_usage_summary = st.session_state.tracker.format_sidebar()
@@ -455,11 +553,6 @@ with st.sidebar:
         st.caption("⚠️ All data is synthetic. No real donor information is used.")
     else:
         st.caption(f"Using uploaded donor data: {active_data_source['label']}")
-
-    st.divider()
-    if st.button("Clear conversation", use_container_width=True):
-        _reset_conversation_state(reset_usage=True)
-        st.rerun()
 
 # ─── Main chat area ────────────────────────────────────────────────────────────
 
