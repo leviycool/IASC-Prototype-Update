@@ -55,40 +55,6 @@ class APICall:
     cache_creation_input_tokens: int = 0  # tokens written to cache (charged at 1.25x)
     cache_read_input_tokens: int = 0      # tokens read from cache (charged at 0.1x)
 
-    def to_dict(self) -> dict:
-        """Serialize one API call for persistence."""
-        return {
-            "timestamp": self.timestamp.isoformat(),
-            "input_tokens": self.input_tokens,
-            "output_tokens": self.output_tokens,
-            "model": self.model,
-            "had_tool_use": self.had_tool_use,
-            "latency_ms": self.latency_ms,
-            "cache_creation_input_tokens": self.cache_creation_input_tokens,
-            "cache_read_input_tokens": self.cache_read_input_tokens,
-        }
-
-    @classmethod
-    def from_dict(cls, payload: dict | None) -> "APICall":
-        """Rehydrate a persisted API call."""
-        data = payload or {}
-        timestamp = data.get("timestamp")
-        if timestamp:
-            parsed_timestamp = datetime.fromisoformat(timestamp)
-        else:
-            parsed_timestamp = datetime.fromtimestamp(0)
-
-        return cls(
-            timestamp=parsed_timestamp,
-            input_tokens=int(data.get("input_tokens", 0)),
-            output_tokens=int(data.get("output_tokens", 0)),
-            model=data.get("model", ""),
-            had_tool_use=bool(data.get("had_tool_use", False)),
-            latency_ms=float(data.get("latency_ms", 0)),
-            cache_creation_input_tokens=int(data.get("cache_creation_input_tokens", 0)),
-            cache_read_input_tokens=int(data.get("cache_read_input_tokens", 0)),
-        )
-
 
 @dataclass
 class ResponseUsage:
@@ -178,25 +144,6 @@ class ResponseUsage:
             f"${cost:.4f} | {self.total_latency_ms:.0f}ms"
         )
 
-    def to_dict(self) -> dict:
-        """Serialize one aggregated response for persistence."""
-        return {
-            "question": self.question,
-            "cache_hit": self.cache_hit,
-            "calls": [call.to_dict() for call in self.calls],
-        }
-
-    @classmethod
-    def from_dict(cls, payload: dict | None) -> "ResponseUsage":
-        """Rehydrate a persisted response usage payload."""
-        data = payload or {}
-        usage = cls(
-            question=data.get("question", ""),
-            cache_hit=bool(data.get("cache_hit", False)),
-        )
-        usage.calls = [APICall.from_dict(call) for call in data.get("calls", [])]
-        return usage
-
 
 class SessionTracker:
     """Tracks all API usage within a Streamlit session."""
@@ -229,15 +176,3 @@ class SessionTracker:
             f"- Output tokens: {self.total_output_tokens:,}\n"
             f"- Estimated cost: ${self.total_cost:.4f}\n"
         )
-
-    def to_dict(self) -> dict:
-        """Serialize the full tracker for persistence or debugging."""
-        return {"responses": [response.to_dict() for response in self.responses]}
-
-    @classmethod
-    def from_dict(cls, payload: dict | None) -> "SessionTracker":
-        """Rehydrate a serialized tracker."""
-        tracker = cls()
-        for response in (payload or {}).get("responses", []):
-            tracker.responses.append(ResponseUsage.from_dict(response))
-        return tracker
