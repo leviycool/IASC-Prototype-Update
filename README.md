@@ -105,6 +105,8 @@ You do not need to run `generate_mock_data.py` manually.
 
 Note: do not use real donor data with this deployment. The app has no authentication.
 
+Conversation state is persisted to a local SQLite file (`data/session_state.db`) and restored after a browser refresh for the same browser session. On Streamlit Community Cloud, that local file normally survives ordinary reruns, but it is **not guaranteed** to survive app restarts, redeployments, or container replacement. Archived conversations follow the same durability model.
+
 **To rotate the API key after initial deployment:** go to https://share.streamlit.io, find the app, click the three-dot menu (⋮) on the right > **Settings** > **Secrets**, and update the value to the new key in the format `ANTHROPIC_API_KEY = "sk-ant-..."` or `OPENAI_API_KEY = "sk-proj-..."`. The app will restart automatically.
 
 ---
@@ -117,11 +119,19 @@ Note: do not use real donor data with this deployment. The app has no authentica
 
 **Sidebar stats:** The sidebar shows a live summary of the database — total contacts, active donors, lapsed donors, prospects, total lifetime giving, and average gift — so you always have context at a glance.
 
-**Token usage:** Every assistant response displays an inline usage line below it showing the model used, number of API calls, input/output token counts, estimated cost, and latency. The sidebar accumulates session totals so you can track your spending across a full session.
+**Token usage:** Every assistant response displays an inline usage line below it showing the model used, number of API calls, input/output token counts, estimated cost, and latency. The sidebar shows cumulative usage for the current live conversation.
 
 **Backend and model selection:** The Settings section in the sidebar now includes both a `Backend` selector and a `Model` selector. You can switch between Claude and OpenAI in the UI, then choose a model from the active provider. If the selected provider is missing its API key, the sidebar shows a warning instead of silently failing.
 
-**Clear conversation:** The "Clear conversation" button at the bottom of the sidebar resets both the chat history and the session token tracker.
+**Refresh-safe conversation state:** The current conversation is saved to `data/session_state.db` and restored automatically after a page refresh for the same browser session. The saved state includes chat messages, session memory, selected backend/model, current data source, and token usage tracker.
+
+**New conversation and archiving:** The sidebar `Conversation` section supports three actions:
+
+- `New conversation` clears the current live conversation and starts a fresh one while keeping the current data source and model settings.
+- `Archive current` saves the live conversation as a snapshot and then clears the current conversation.
+- `Restore selected archive` replaces the live conversation with one archived snapshot from the current browser session.
+
+**Archive scope:** Archived conversations are scoped to the current browser session ID (`sid` in the URL). They are stored locally in `data/session_state.db`, so they are available after page refreshes and normal reruns, but they should not be treated as permanent storage on Streamlit Community Cloud.
 
 ---
 
@@ -171,6 +181,7 @@ iasc-donor-tool/
 │   ├── generate_mock_data.py  # Script to create synthetic donor database
 │   ├── import_csv_to_db.py    # Rebuild donors.db from donor CSV files
 │   ├── donors.db              # SQLite database (generated)
+│   ├── session_state.db       # Local chat persistence + archived conversation snapshots
 │   ├── data_dictionary.md     # Field definitions and source mappings
 │   ├── synthetic_donors_*.csv # Optional CSV-backed deployment dataset
 │   └── sample_salesforce.csv  # Real IASC sample (91 records, anonymized)
@@ -184,10 +195,12 @@ iasc-donor-tool/
 │   ├── queries.py             # Data query functions (the "tools" Claude can call)
 │   ├── knowledge.py           # Knowledge base loader and formatter
 │   ├── prompts.py             # System prompts and prompt templates
+│   ├── session_store.py       # Refresh-safe conversation persistence + archive storage
 │   ├── token_tracker.py       # Token usage tracking and cost estimation
 │   └── config.py              # Configuration and constants
 ├── tests/
 │   ├── test_queries.py        # Unit tests for query functions (no API calls)
+│   ├── test_session_store.py  # Persistence and archive regression tests
 │   └── test_scenarios.py      # Behavioral tests (make real API calls)
 └── docs/
     └── build_log.md           # Development notes and decisions
@@ -236,7 +249,8 @@ Using Haiku instead of Sonnet reduces costs by roughly 75-80% at the expense of 
 - **No data export.** Query results are displayed in the chat; there is no CSV download or report generation.
 - **Wealth scores are estimates.** The mock wealth scores (1-10) approximate WealthEngine output. Real scores would come from the WealthEngine API.
 - **Email engagement is approximate.** Open rates and click dates in the mock data simulate MailChimp exports. Real integration would pull live MailChimp data.
-- **No persistent conversation history.** Closing and reopening the browser tab starts a fresh session.
+- **Conversation persistence is local, not durable infrastructure.** The current live conversation and archived snapshots are stored in `data/session_state.db`. They survive page refreshes and ordinary reruns for the same browser session, but on Streamlit Community Cloud they may be lost after redeployments, restarts, or container replacement.
+- **Archives are session-scoped.** The archive list is tied to the current browser session ID in the URL. It is not a shared multi-user conversation system.
 
 ---
 
