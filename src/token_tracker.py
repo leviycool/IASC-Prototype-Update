@@ -6,6 +6,8 @@ including prompt caching savings. Designed to be displayed inline with
 each response and in the Streamlit sidebar.
 """
 
+from __future__ import annotations
+
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -54,6 +56,55 @@ class APICall:
     latency_ms: float
     cache_creation_input_tokens: int = 0  # tokens written to cache (charged at 1.25x)
     cache_read_input_tokens: int = 0      # tokens read from cache (charged at 0.1x)
+
+    def to_dict(self) -> dict:
+        """Serialize one API call for persistence."""
+        return {
+            "timestamp": self.timestamp.isoformat(),
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "model": self.model,
+            "had_tool_use": self.had_tool_use,
+            "latency_ms": self.latency_ms,
+            "cache_creation_input_tokens": self.cache_creation_input_tokens,
+            "cache_read_input_tokens": self.cache_read_input_tokens,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict | "APICall" | None) -> "APICall":
+        """Rehydrate one persisted API call defensively."""
+        if isinstance(payload, cls):
+            return payload
+
+        if not isinstance(payload, dict):
+            return cls(
+                timestamp=datetime.fromtimestamp(0),
+                input_tokens=0,
+                output_tokens=0,
+                model="",
+                had_tool_use=False,
+                latency_ms=0,
+            )
+
+        timestamp = payload.get("timestamp")
+        if isinstance(timestamp, str) and timestamp:
+            try:
+                parsed_timestamp = datetime.fromisoformat(timestamp)
+            except ValueError:
+                parsed_timestamp = datetime.fromtimestamp(0)
+        else:
+            parsed_timestamp = datetime.fromtimestamp(0)
+
+        return cls(
+            timestamp=parsed_timestamp,
+            input_tokens=int(payload.get("input_tokens", 0) or 0),
+            output_tokens=int(payload.get("output_tokens", 0) or 0),
+            model=str(payload.get("model", "") or ""),
+            had_tool_use=bool(payload.get("had_tool_use", False)),
+            latency_ms=float(payload.get("latency_ms", 0) or 0),
+            cache_creation_input_tokens=int(payload.get("cache_creation_input_tokens", 0) or 0),
+            cache_read_input_tokens=int(payload.get("cache_read_input_tokens", 0) or 0),
+        )
 
 
 @dataclass
@@ -144,6 +195,33 @@ class ResponseUsage:
             f"${cost:.4f} | {self.total_latency_ms:.0f}ms"
         )
 
+    def to_dict(self) -> dict:
+        """Serialize one aggregated response for persistence."""
+        return {
+            "question": self.question,
+            "cache_hit": self.cache_hit,
+            "calls": [call.to_dict() for call in self.calls],
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict | "ResponseUsage" | None) -> "ResponseUsage":
+        """Rehydrate persisted response usage defensively."""
+        if isinstance(payload, cls):
+            return payload
+
+        if not isinstance(payload, dict):
+            return cls(question="")
+
+        usage = cls(
+            question=str(payload.get("question", "") or ""),
+            cache_hit=bool(payload.get("cache_hit", False)),
+        )
+        usage.calls = [
+            APICall.from_dict(call)
+            for call in payload.get("calls", [])
+        ]
+        return usage
+
 
 class SessionTracker:
     """Tracks all API usage within a Streamlit session."""
@@ -176,3 +254,25 @@ class SessionTracker:
             f"- Output tokens: {self.total_output_tokens:,}\n"
             f"- Estimated cost: ${self.total_cost:.4f}\n"
         )
+
+    def to_dict(self) -> dict:
+        """Serialize the tracker for persistence."""
+        return {
+            "responses": [response.to_dict() for response in self.responses],
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict | "SessionTracker" | None) -> "SessionTracker":
+        """Rehydrate a persisted tracker defensively."""
+        if isinstance(payload, cls):
+            return payload
+
+        tracker = cls()
+        if not isinstance(payload, dict):
+            return tracker
+
+        tracker.responses = [
+            ResponseUsage.from_dict(response)
+            for response in payload.get("responses", [])
+        ]
+        return tracker

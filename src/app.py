@@ -68,6 +68,7 @@ from llm import get_response
 from token_tracker import SessionTracker
 from knowledge import get_knowledge_token_estimate
 from queries import reset_active_db_path, set_active_db_path
+from session_store import load_session_state, save_session_state
 from task_memory import (
     classify_user_message,
     format_task_context_markdown,
@@ -86,6 +87,81 @@ st.set_page_config(
     page_icon="H",  # Hedgehog Review initial
     layout="wide",
 )
+
+
+def _get_query_param(name: str) -> str | None:
+    """Read one query param across Streamlit versions."""
+    try:
+        value = st.query_params.get(name)
+    except Exception:
+        value = st.experimental_get_query_params().get(name)
+
+    if isinstance(value, list):
+        return value[0] if value else None
+    return value
+
+
+def _set_query_param(name: str, value: str) -> None:
+    """Persist one query param across Streamlit versions."""
+    try:
+        st.query_params[name] = value
+    except Exception:
+        params = st.experimental_get_query_params()
+        params[name] = value
+        st.experimental_set_query_params(**params)
+
+
+def _ensure_browser_session_id() -> str:
+    """Create or reuse a stable browser session id for refresh persistence."""
+    existing = _get_query_param("sid")
+    if existing:
+        return existing
+
+    import uuid
+
+    session_id = str(uuid.uuid4())[:8]
+    _set_query_param("sid", session_id)
+    return session_id
+
+
+def _restore_persisted_state() -> None:
+    """Load saved chat state for this browser session if available."""
+    restored = load_session_state(st.session_state.session_id)
+    st.session_state.data_source_warning = None
+    if restored is None:
+        return
+
+    restored_data_source = restored["data_source"]
+    restored_db_path = Path(restored_data_source["db_path"])
+    if restored_data_source["kind"] != "synthetic" and not restored_db_path.exists():
+        st.session_state.data_source_warning = (
+            "The previously uploaded donor database for this browser session is no longer available, "
+            "so the app fell back to the synthetic demo dataset."
+        )
+        restored_data_source = get_default_data_source()
+
+    st.session_state.messages = restored["messages"]
+    st.session_state.tracker = restored["tracker"]
+    st.session_state.selected_model = restored.get("selected_model") or st.session_state.selected_model
+    st.session_state.selected_provider = restored.get("selected_provider") or st.session_state.selected_provider
+    st.session_state.data_source = restored_data_source
+    st.session_state.task_memory = sync_memory_with_data_source(
+        restored["task_memory"],
+        restored_data_source,
+    )
+
+
+def _persist_session_state() -> None:
+    """Save the current browser session so a refresh can restore it."""
+    save_session_state(
+        session_id=st.session_state.session_id,
+        messages=st.session_state.messages,
+        task_memory=st.session_state.task_memory,
+        data_source=st.session_state.data_source,
+        tracker=st.session_state.tracker,
+        selected_model=st.session_state.selected_model,
+        selected_provider=st.session_state.selected_provider,
+    )
 
 # ─── Session state initialization ─────────────────────────────────────────────
 
@@ -113,8 +189,7 @@ if "pending_question_source" not in st.session_state:
     st.session_state.pending_question_source = None
 
 if "session_id" not in st.session_state:
-    import uuid
-    st.session_state.session_id = str(uuid.uuid4())[:8]
+    st.session_state.session_id = _ensure_browser_session_id()
 
 if "data_source" not in st.session_state:
     st.session_state.data_source = get_default_data_source()
@@ -136,6 +211,18 @@ if "current_turn_type" not in st.session_state:
 if "last_response_used_context" not in st.session_state:
     st.session_state.last_response_used_context = False
 
+if "data_source_warning" not in st.session_state:
+    st.session_state.data_source_warning = None
+
+if "persisted_state_loaded" not in st.session_state:
+    _restore_persisted_state()
+    st.session_state.persisted_state_loaded = True
+else:
+    st.session_state.task_memory = sync_memory_with_data_source(
+        st.session_state.task_memory,
+        st.session_state.data_source,
+    )
+
 
 def _reset_conversation_state(reset_usage: bool = False) -> None:
     """Reset chat and memory while preserving the current data source."""
@@ -150,6 +237,7 @@ def _reset_conversation_state(reset_usage: bool = False) -> None:
     st.session_state.pending_question_source = None
     st.session_state.current_turn_type = None
     st.session_state.last_response_used_context = False
+    _persist_session_state()
 
 
 active_data_source = st.session_state.data_source
@@ -206,6 +294,8 @@ with st.sidebar:
     st.subheader("Data source")
     st.caption(f"Current source: {active_data_source['label']}")
     st.caption(active_data_source.get("source_note", ""))
+    if st.session_state.data_source_warning:
+        st.warning(st.session_state.data_source_warning)
 
     with st.expander("Upload your own data", expanded=False):
         st.caption("Use either one SQLite `.db` file or the three CSV exports used by this app.")
@@ -254,6 +344,7 @@ with st.sidebar:
                     )
 
                 st.session_state.data_source = new_data_source
+                st.session_state.data_source_warning = None
                 _reset_conversation_state(reset_usage=False)
                 st.rerun()
             except Exception as e:
@@ -263,6 +354,7 @@ with st.sidebar:
         if st.button("Switch back to demo data", use_container_width=True):
             reset_uploaded_data_source(st.session_state.session_id)
             st.session_state.data_source = get_default_data_source()
+            st.session_state.data_source_warning = None
             _reset_conversation_state(reset_usage=False)
             st.rerun()
 
@@ -347,6 +439,8 @@ with st.sidebar:
             st.session_state.selected_model = model_id
             break
 
+    _persist_session_state()
+
     if not get_api_key_for_provider(selected_backend):
         backend_name = backend_options[selected_backend]
         st.caption(f"{backend_name} API key not configured for this deployment.")
@@ -385,6 +479,9 @@ else:
         f"Using uploaded donor data for this session: {active_data_source['label']}.",
         icon="📁",
     )
+
+if st.session_state.data_source_warning:
+    st.warning(st.session_state.data_source_warning)
 
 # Render the full conversation history
 for msg in st.session_state.messages:
@@ -441,6 +538,7 @@ if user_input:
     with st.chat_message("user"):
         st.markdown(user_input)
     st.session_state.messages.append({"role": "user", "content": user_input, "usage": None})
+    _persist_session_state()
 
     # Build the conversation history to pass to the API.
     # We exclude the message we just appended (it will be the new user_message
@@ -497,6 +595,7 @@ if user_input:
         "content": response_text,
         "usage": response_usage,
     })
+    _persist_session_state()
 
     # Rerun so the sidebar session-usage section (rendered earlier in the
     # script) picks up the tracker update from this response immediately.
