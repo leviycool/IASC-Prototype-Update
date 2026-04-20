@@ -58,11 +58,19 @@ from config import (
     get_default_model_for_provider,
     get_models_for_provider,
 )
+from conversation_store import (
+    DEFAULT_CONVERSATION_TITLE,
+    create_conversation,
+    get_conversation,
+    get_latest_conversation,
+    list_conversations,
+    save_conversation_state,
+    set_conversation_archived,
+)
 from data_source import (
     get_default_data_source,
     prepare_uploaded_csv_dataset,
     prepare_uploaded_sqlite_database,
-    reset_uploaded_data_source,
 )
 from llm import get_response
 from token_tracker import SessionTracker
@@ -86,6 +94,100 @@ st.set_page_config(
     page_icon="H",  # Hedgehog Review initial
     layout="wide",
 )
+
+
+def _tracker_from_messages(messages: list[dict]) -> SessionTracker:
+    """Rebuild tracker state from persisted assistant messages."""
+    tracker = SessionTracker()
+    for message in messages:
+        usage = message.get("usage")
+        if usage is not None:
+            tracker.responses.append(usage)
+    return tracker
+
+
+def _get_query_param(name: str) -> str | None:
+    """Read a query param across Streamlit versions."""
+    try:
+        value = st.query_params.get(name)
+    except Exception:
+        value = st.experimental_get_query_params().get(name)
+
+    if isinstance(value, list):
+        return value[0] if value else None
+    return value
+
+
+def _set_query_param(name: str, value: str) -> None:
+    """Persist the active conversation in the URL for refresh continuity."""
+    current_value = _get_query_param(name)
+    if current_value == value:
+        return
+
+    try:
+        st.query_params[name] = value
+    except Exception:
+        params = st.experimental_get_query_params()
+        params[name] = value
+        st.experimental_set_query_params(**params)
+
+
+def _load_conversation_into_session(conversation: dict) -> None:
+    """Hydrate Streamlit state from a persisted conversation."""
+    data_source = conversation["data_source"]
+    data_source_warning = None
+    db_path = data_source.get("db_path")
+    if data_source.get("kind") != "synthetic" and db_path and not Path(db_path).exists():
+        data_source_warning = (
+            "The uploaded data backing this topic is no longer available on disk, "
+            "so the app fell back to the synthetic demo dataset."
+        )
+        data_source = get_default_data_source()
+
+    task_memory = sync_memory_with_data_source(conversation["task_memory"], data_source)
+    st.session_state.active_conversation_id = conversation["id"]
+    st.session_state.active_conversation_title = conversation["title"]
+    st.session_state.active_conversation_archived = conversation["is_archived"]
+    st.session_state.messages = conversation["messages"]
+    st.session_state.data_source = data_source
+    st.session_state.task_memory = task_memory
+    st.session_state.tracker = _tracker_from_messages(conversation["messages"])
+    st.session_state.pending_question = None
+    st.session_state.pending_question_source = None
+    st.session_state.current_turn_type = task_memory.get("last_turn_type")
+    st.session_state.last_response_used_context = False
+    st.session_state.data_source_warning = data_source_warning
+    _set_query_param("conversation", conversation["id"])
+
+
+def _save_current_conversation() -> None:
+    """Persist the currently loaded topic."""
+    conversation_id = st.session_state.get("active_conversation_id")
+    if not conversation_id:
+        return
+
+    updated = save_conversation_state(
+        conversation_id,
+        title=st.session_state.get("active_conversation_title"),
+        messages=st.session_state.get("messages", []),
+        task_memory=st.session_state.get("task_memory"),
+        data_source=st.session_state.get("data_source"),
+    )
+    st.session_state.active_conversation_title = updated["title"]
+    st.session_state.active_conversation_archived = updated["is_archived"]
+
+
+def _start_new_conversation(data_source: dict | None = None) -> None:
+    """Create and load a fresh topic thread."""
+    target_data_source = data_source or st.session_state.get("data_source") or get_default_data_source()
+    task_memory = sync_memory_with_data_source(reset_task_memory(), target_data_source)
+    conversation = create_conversation(
+        title=DEFAULT_CONVERSATION_TITLE,
+        data_source=target_data_source,
+        task_memory=task_memory,
+        messages=[],
+    )
+    _load_conversation_into_session(conversation)
 
 # ─── Session state initialization ─────────────────────────────────────────────
 
@@ -116,29 +218,39 @@ if "session_id" not in st.session_state:
     import uuid
     st.session_state.session_id = str(uuid.uuid4())[:8]
 
-if "data_source" not in st.session_state:
-    st.session_state.data_source = get_default_data_source()
-
-if "task_memory" not in st.session_state:
-    st.session_state.task_memory = sync_memory_with_data_source(
-        initialize_task_memory(),
-        st.session_state.data_source,
-    )
-else:
-    st.session_state.task_memory = sync_memory_with_data_source(
-        st.session_state.task_memory,
-        st.session_state.data_source,
-    )
-
 if "current_turn_type" not in st.session_state:
     st.session_state.current_turn_type = None
 
 if "last_response_used_context" not in st.session_state:
     st.session_state.last_response_used_context = False
 
+if "active_conversation_id" not in st.session_state:
+    requested_conversation_id = _get_query_param("conversation")
+    conversation = get_conversation(requested_conversation_id)
+    if conversation is None:
+        conversation = get_latest_conversation(include_archived=False)
+    if conversation is None:
+        initial_data_source = get_default_data_source()
+        conversation = create_conversation(
+            title=DEFAULT_CONVERSATION_TITLE,
+            data_source=initial_data_source,
+            task_memory=sync_memory_with_data_source(
+                initialize_task_memory(),
+                initial_data_source,
+            ),
+            messages=[],
+        )
+    _load_conversation_into_session(conversation)
+else:
+    requested_conversation_id = _get_query_param("conversation")
+    if requested_conversation_id and requested_conversation_id != st.session_state.active_conversation_id:
+        requested_conversation = get_conversation(requested_conversation_id)
+        if requested_conversation is not None:
+            _load_conversation_into_session(requested_conversation)
+
 
 def _reset_conversation_state(reset_usage: bool = False) -> None:
-    """Reset chat and memory while preserving the current data source."""
+    """Reset the current topic while preserving its current data source."""
     st.session_state.messages = []
     if reset_usage:
         st.session_state.tracker = SessionTracker()
@@ -150,16 +262,95 @@ def _reset_conversation_state(reset_usage: bool = False) -> None:
     st.session_state.pending_question_source = None
     st.session_state.current_turn_type = None
     st.session_state.last_response_used_context = False
+    st.session_state.active_conversation_title = DEFAULT_CONVERSATION_TITLE
+    _save_current_conversation()
 
 
 active_data_source = st.session_state.data_source
 active_db_path = Path(active_data_source["db_path"])
+active_conversation_archived = bool(st.session_state.get("active_conversation_archived"))
 
 # ─── Sidebar ─────────────────────────────────────────────────────────────────
 
 with st.sidebar:
     st.title(APP_TITLE)
     st.caption(APP_SUBTITLE)
+    st.divider()
+
+    st.subheader("Topics")
+    st.caption(f"Current topic: {st.session_state.active_conversation_title}")
+    if active_conversation_archived:
+        st.caption("This topic is archived and read-only until restored.")
+
+    topic_col1, topic_col2 = st.columns(2)
+    if topic_col1.button("New topic", use_container_width=True):
+        _save_current_conversation()
+        _start_new_conversation()
+        st.rerun()
+
+    archive_label = "Restore topic" if active_conversation_archived else "Archive topic"
+    if topic_col2.button(archive_label, use_container_width=True):
+        _save_current_conversation()
+        updated_conversation = set_conversation_archived(
+            st.session_state.active_conversation_id,
+            archived=not active_conversation_archived,
+        )
+        if updated_conversation["is_archived"]:
+            replacement = get_latest_conversation(include_archived=False)
+            if replacement is None or replacement["id"] == updated_conversation["id"]:
+                _start_new_conversation()
+            else:
+                _load_conversation_into_session(replacement)
+        else:
+            _load_conversation_into_session(updated_conversation)
+        st.rerun()
+
+    active_topics = list_conversations(archived=False, limit=12)
+    archived_topics = list_conversations(archived=True, limit=12)
+
+    if active_topics:
+        for topic in active_topics:
+            is_current_topic = topic["id"] == st.session_state.active_conversation_id
+            if st.button(
+                topic["title"],
+                key=f"topic_{topic['id']}",
+                use_container_width=True,
+                disabled=is_current_topic,
+            ):
+                _save_current_conversation()
+                selected_topic = get_conversation(topic["id"])
+                if selected_topic is not None:
+                    _load_conversation_into_session(selected_topic)
+                st.rerun()
+            st.caption(
+                f"{topic['message_count']} messages | {topic['data_source_label']}"
+            )
+
+    with st.expander(f"Archived topics ({len(archived_topics)})", expanded=False):
+        if not archived_topics:
+            st.caption("No archived topics yet.")
+        for topic in archived_topics:
+            preview = topic["preview"] or topic["data_source_label"]
+            if st.button(
+                topic["title"],
+                key=f"archived_topic_{topic['id']}",
+                use_container_width=True,
+            ):
+                _save_current_conversation()
+                selected_topic = get_conversation(topic["id"])
+                if selected_topic is not None:
+                    _load_conversation_into_session(selected_topic)
+                st.rerun()
+            if st.button(
+                "Restore",
+                key=f"restore_topic_{topic['id']}",
+                use_container_width=True,
+            ):
+                restored_topic = set_conversation_archived(topic["id"], archived=False)
+                _load_conversation_into_session(restored_topic)
+                st.rerun()
+            st.caption(preview)
+
     st.divider()
 
     # Quick stats from the database — loaded once per sidebar render
@@ -206,6 +397,8 @@ with st.sidebar:
     st.subheader("Data source")
     st.caption(f"Current source: {active_data_source['label']}")
     st.caption(active_data_source.get("source_note", ""))
+    if st.session_state.get("data_source_warning"):
+        st.warning(st.session_state.data_source_warning)
 
     with st.expander("Upload your own data", expanded=False):
         st.caption("Use either one SQLite `.db` file or the three CSV exports used by this app.")
@@ -253,17 +446,16 @@ with st.sidebar:
                         "Upload either a SQLite `.db` file or all three CSV files: contacts, gifts, and interactions."
                     )
 
-                st.session_state.data_source = new_data_source
-                _reset_conversation_state(reset_usage=False)
+                _save_current_conversation()
+                _start_new_conversation(data_source=new_data_source)
                 st.rerun()
             except Exception as e:
                 st.error(f"Could not load uploaded data: {e}")
 
     if active_data_source["kind"] != "synthetic":
         if st.button("Switch back to demo data", use_container_width=True):
-            reset_uploaded_data_source(st.session_state.session_id)
-            st.session_state.data_source = get_default_data_source()
-            _reset_conversation_state(reset_usage=False)
+            _save_current_conversation()
+            _start_new_conversation(data_source=get_default_data_source())
             st.rerun()
 
     st.divider()
@@ -282,7 +474,12 @@ with st.sidebar:
     ]
 
     for q in sample_questions:
-        if st.button(q, key=f"sample_{hash(q)}", use_container_width=True):
+        if st.button(
+            q,
+            key=f"sample_{hash(q)}",
+            use_container_width=True,
+            disabled=active_conversation_archived,
+        ):
             st.session_state.pending_question = q
             st.session_state.pending_question_source = "sample_question"
             st.rerun()
@@ -298,14 +495,15 @@ with st.sidebar:
 
     st.divider()
 
-    # Session usage summary
-    st.subheader("Session usage")
+    # Topic usage summary
+    st.subheader("Topic usage")
     session_usage_summary = st.session_state.tracker.format_sidebar()
     session_usage_summary += (
         f"- Memory id: {st.session_state.task_memory.get('memory_id') or 'None'}\n"
         f"- Memory active: {'Yes' if st.session_state.task_memory.get('memory_active') else 'No'}\n"
         f"- Current turn type: {st.session_state.current_turn_type or 'None'}\n"
         f"- Active data source: {st.session_state.data_source['label']}\n"
+        f"- Archived: {'Yes' if active_conversation_archived else 'No'}\n"
     )
     st.markdown(session_usage_summary)
 
@@ -355,7 +553,7 @@ with st.sidebar:
     kb_tokens = get_knowledge_token_estimate()
     st.caption(f"Knowledge base: ~{kb_tokens:,} tokens per query")
 
-    # Clear conversation
+    # Topic controls
     st.divider()
     if active_data_source["kind"] == "synthetic":
         st.caption("⚠️ All data is synthetic. No real donor information is used.")
@@ -363,7 +561,11 @@ with st.sidebar:
         st.caption(f"Using uploaded donor data: {active_data_source['label']}")
 
     st.divider()
-    if st.button("Clear conversation", use_container_width=True):
+    if st.button(
+        "Reset current topic",
+        use_container_width=True,
+        disabled=active_conversation_archived,
+    ):
         _reset_conversation_state(reset_usage=True)
         st.rerun()
 
@@ -371,6 +573,8 @@ with st.sidebar:
 
 st.header(APP_TITLE)
 st.caption(APP_SUBTITLE)
+topic_status = "Archived topic" if active_conversation_archived else "Active topic"
+st.caption(f"{topic_status}: {st.session_state.active_conversation_title}")
 
 if active_data_source["kind"] == "synthetic":
     st.warning(
@@ -386,6 +590,12 @@ else:
         icon="📁",
     )
 
+if st.session_state.get("data_source_warning"):
+    st.warning(st.session_state.data_source_warning)
+
+if active_conversation_archived:
+    st.info("This topic is archived. Restore it from the sidebar to continue the conversation.")
+
 # Render the full conversation history
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
@@ -397,7 +607,10 @@ for msg in st.session_state.messages:
 # ─── Input handling ────────────────────────────────────────────────────────────
 
 # The chat_input widget always renders at the bottom of the page
-user_input = st.chat_input("Ask a question about your donors...")
+user_input = st.chat_input(
+    "Ask a question about your donors...",
+    disabled=active_conversation_archived,
+)
 user_input_source = "chat"
 
 # If a sidebar sample question was clicked on the previous run, use it now.
@@ -441,6 +654,7 @@ if user_input:
     with st.chat_message("user"):
         st.markdown(user_input)
     st.session_state.messages.append({"role": "user", "content": user_input, "usage": None})
+    _save_current_conversation()
 
     # Build the conversation history to pass to the API.
     # We exclude the message we just appended (it will be the new user_message
@@ -497,7 +711,8 @@ if user_input:
         "content": response_text,
         "usage": response_usage,
     })
+    _save_current_conversation()
 
-    # Rerun so the sidebar session-usage section (rendered earlier in the
+    # Rerun so the sidebar topic-usage section (rendered earlier in the
     # script) picks up the tracker update from this response immediately.
     st.rerun()
