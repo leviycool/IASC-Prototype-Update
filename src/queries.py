@@ -16,12 +16,14 @@ No pandas is used here; transformation is done in pure Python.
 
 import math
 import sqlite3
+from contextvars import ContextVar
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Optional
 
 # Resolve DB path relative to this file so the module works regardless of cwd
 DB_PATH = Path(__file__).parent.parent / "data" / "donors.db"
+ACTIVE_DB_PATH: ContextVar[Path] = ContextVar("ACTIVE_DB_PATH", default=DB_PATH)
 
 
 # ---------------------------------------------------------------------------
@@ -34,9 +36,25 @@ def get_db_connection() -> sqlite3.Connection:
     Using URI mode with mode=ro prevents accidental writes and makes the
     intent explicit to anyone reading the code.
     """
-    conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+    active_db_path = Path(ACTIVE_DB_PATH.get())
+    conn = sqlite3.connect(f"file:{active_db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def set_active_db_path(db_path: str | Path):
+    """Set the donor database path for the current execution context."""
+    return ACTIVE_DB_PATH.set(Path(db_path))
+
+
+def reset_active_db_path(token) -> None:
+    """Restore the prior donor database path for the current execution context."""
+    ACTIVE_DB_PATH.reset(token)
+
+
+def get_active_db_path() -> Path:
+    """Return the donor database path for the current execution context."""
+    return Path(ACTIVE_DB_PATH.get())
 
 
 # ---------------------------------------------------------------------------

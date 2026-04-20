@@ -52,23 +52,29 @@ from config import (
     APP_TITLE,
     APP_SUBTITLE,
     BACKEND_OPTIONS,
-    DB_PATH,
     DEFAULT_MODEL,
     DEFAULT_PROVIDER,
     get_api_key_for_provider,
     get_default_model_for_provider,
     get_models_for_provider,
 )
+from data_source import (
+    get_default_data_source,
+    prepare_uploaded_csv_dataset,
+    prepare_uploaded_sqlite_database,
+    reset_uploaded_data_source,
+)
 from llm import get_response
 from token_tracker import SessionTracker
 from knowledge import get_knowledge_token_estimate
+from queries import reset_active_db_path, set_active_db_path
 from task_memory import (
     classify_user_message,
     format_task_context_markdown,
     has_active_task,
     initialize_task_memory,
     reset_task_memory,
-    summarize_task_scope,
+    sync_memory_with_data_source,
     update_task_memory,
     update_task_memory_from_response,
 )
@@ -110,14 +116,44 @@ if "session_id" not in st.session_state:
     import uuid
     st.session_state.session_id = str(uuid.uuid4())[:8]
 
+if "data_source" not in st.session_state:
+    st.session_state.data_source = get_default_data_source()
+
 if "task_memory" not in st.session_state:
-    st.session_state.task_memory = initialize_task_memory()
+    st.session_state.task_memory = sync_memory_with_data_source(
+        initialize_task_memory(),
+        st.session_state.data_source,
+    )
+else:
+    st.session_state.task_memory = sync_memory_with_data_source(
+        st.session_state.task_memory,
+        st.session_state.data_source,
+    )
 
 if "current_turn_type" not in st.session_state:
     st.session_state.current_turn_type = None
 
 if "last_response_used_context" not in st.session_state:
     st.session_state.last_response_used_context = False
+
+
+def _reset_conversation_state(reset_usage: bool = False) -> None:
+    """Reset chat and memory while preserving the current data source."""
+    st.session_state.messages = []
+    if reset_usage:
+        st.session_state.tracker = SessionTracker()
+    st.session_state.task_memory = sync_memory_with_data_source(
+        reset_task_memory(),
+        st.session_state.data_source,
+    )
+    st.session_state.pending_question = None
+    st.session_state.pending_question_source = None
+    st.session_state.current_turn_type = None
+    st.session_state.last_response_used_context = False
+
+
+active_data_source = st.session_state.data_source
+active_db_path = Path(active_data_source["db_path"])
 
 # ─── Sidebar ─────────────────────────────────────────────────────────────────
 
@@ -128,10 +164,10 @@ with st.sidebar:
 
     # Quick stats from the database — loaded once per sidebar render
     st.subheader("Quick stats")
-    if DB_PATH.exists():
+    if active_db_path.exists():
         try:
             import sqlite3
-            conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
+            conn = sqlite3.connect(f"file:{active_db_path}?mode=ro", uri=True)
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
 
@@ -163,7 +199,72 @@ with st.sidebar:
         except Exception as e:
             st.warning(f"Could not load stats: {e}")
     else:
-        st.warning("Database not found. Run: `python data/import_csv_to_db.py` or `python data/generate_mock_data.py`")
+        st.warning("Active database not found. Upload donor data or switch back to the demo dataset.")
+
+    st.divider()
+
+    st.subheader("Data source")
+    st.caption(f"Current source: {active_data_source['label']}")
+    st.caption(active_data_source.get("source_note", ""))
+
+    with st.expander("Upload your own data", expanded=False):
+        st.caption("Use either one SQLite `.db` file or the three CSV exports used by this app.")
+        uploaded_db = st.file_uploader(
+            "SQLite donor database",
+            type=["db", "sqlite", "sqlite3"],
+            key="upload_sqlite_db",
+        )
+        uploaded_contacts = st.file_uploader(
+            "Contacts CSV",
+            type=["csv"],
+            key="upload_contacts_csv",
+        )
+        uploaded_gifts = st.file_uploader(
+            "Gifts CSV",
+            type=["csv"],
+            key="upload_gifts_csv",
+        )
+        uploaded_interactions = st.file_uploader(
+            "Interactions CSV",
+            type=["csv"],
+            key="upload_interactions_csv",
+        )
+
+        if st.button("Use uploaded data", key="apply_uploaded_data", use_container_width=True):
+            try:
+                if uploaded_db is not None:
+                    new_data_source = prepare_uploaded_sqlite_database(
+                        file_name=uploaded_db.name,
+                        file_bytes=uploaded_db.getvalue(),
+                        session_id=st.session_state.session_id,
+                    )
+                elif uploaded_contacts and uploaded_gifts and uploaded_interactions:
+                    new_data_source = prepare_uploaded_csv_dataset(
+                        contacts_name=uploaded_contacts.name,
+                        contacts_bytes=uploaded_contacts.getvalue(),
+                        gifts_name=uploaded_gifts.name,
+                        gifts_bytes=uploaded_gifts.getvalue(),
+                        interactions_name=uploaded_interactions.name,
+                        interactions_bytes=uploaded_interactions.getvalue(),
+                        session_id=st.session_state.session_id,
+                    )
+                else:
+                    raise ValueError(
+                        "Upload either a SQLite `.db` file or all three CSV files: contacts, gifts, and interactions."
+                    )
+
+                st.session_state.data_source = new_data_source
+                _reset_conversation_state(reset_usage=False)
+                st.rerun()
+            except Exception as e:
+                st.error(f"Could not load uploaded data: {e}")
+
+    if active_data_source["kind"] != "synthetic":
+        if st.button("Switch back to demo data", use_container_width=True):
+            reset_uploaded_data_source(st.session_state.session_id)
+            st.session_state.data_source = get_default_data_source()
+            _reset_conversation_state(reset_usage=False)
+            st.rerun()
 
     st.divider()
 
@@ -188,7 +289,7 @@ with st.sidebar:
 
     st.divider()
 
-    st.subheader("Current Task Context")
+    st.subheader("Session memory")
     task_context_markdown = format_task_context_markdown(st.session_state.task_memory)
     if has_active_task(st.session_state.task_memory):
         st.markdown(task_context_markdown)
@@ -201,9 +302,10 @@ with st.sidebar:
     st.subheader("Session usage")
     session_usage_summary = st.session_state.tracker.format_sidebar()
     session_usage_summary += (
-        f"- Current task id: {st.session_state.task_memory.get('task_id') or 'None'}\n"
+        f"- Memory id: {st.session_state.task_memory.get('memory_id') or 'None'}\n"
         f"- Memory active: {'Yes' if st.session_state.task_memory.get('memory_active') else 'No'}\n"
         f"- Current turn type: {st.session_state.current_turn_type or 'None'}\n"
+        f"- Active data source: {st.session_state.data_source['label']}\n"
     )
     st.markdown(session_usage_summary)
 
@@ -255,17 +357,14 @@ with st.sidebar:
 
     # Clear conversation
     st.divider()
-    st.caption("⚠️ All data is synthetic. No real donor information is used.")
+    if active_data_source["kind"] == "synthetic":
+        st.caption("⚠️ All data is synthetic. No real donor information is used.")
+    else:
+        st.caption(f"Using uploaded donor data: {active_data_source['label']}")
 
     st.divider()
     if st.button("Clear conversation", use_container_width=True):
-        st.session_state.messages = []
-        st.session_state.tracker = SessionTracker()
-        st.session_state.task_memory = reset_task_memory()
-        st.session_state.pending_question = None
-        st.session_state.pending_question_source = None
-        st.session_state.current_turn_type = None
-        st.session_state.last_response_used_context = False
+        _reset_conversation_state(reset_usage=True)
         st.rerun()
 
 # ─── Main chat area ────────────────────────────────────────────────────────────
@@ -273,26 +372,18 @@ with st.sidebar:
 st.header(APP_TITLE)
 st.caption(APP_SUBTITLE)
 
-st.warning(
-    "**Synthetic data only.** All donor names, contact details, gift amounts, and "
-    "engagement records shown here are computer-generated and fictitious. This prototype "
-    "does not contain real IASC donor information, confidential fundraising data, or "
-    "personally identifiable information of any kind.",
-    icon="⚠️",
-)
-
-active_dataset_label = (
-    f"Synthetic donor database ({DB_PATH.name})"
-    if DB_PATH.exists()
-    else "Synthetic donor CSV/bootstrap data"
-)
-with st.container():
-    st.caption("Current analysis context")
-    st.markdown(
-        f"- Active dataset/source: {active_dataset_label}\n"
-        f"- Current scope/filter: {summarize_task_scope(st.session_state.task_memory)}\n"
-        f"- Task memory active: {'Yes' if st.session_state.task_memory.get('memory_active') else 'No'}\n"
-        f"- Prior-turn context reused: {'Yes' if st.session_state.last_response_used_context else 'No'}\n"
+if active_data_source["kind"] == "synthetic":
+    st.warning(
+        "**Synthetic data only.** All donor names, contact details, gift amounts, and "
+        "engagement records shown here are computer-generated and fictitious. This prototype "
+        "does not contain real IASC donor information, confidential fundraising data, or "
+        "personally identifiable information of any kind.",
+        icon="⚠️",
+    )
+else:
+    st.info(
+        f"Using uploaded donor data for this session: {active_data_source['label']}.",
+        icon="📁",
     )
 
 # Render the full conversation history
@@ -320,6 +411,10 @@ if st.session_state.pending_question and not user_input:
     st.session_state.pending_question_source = None
 
 if user_input:
+    st.session_state.task_memory = sync_memory_with_data_source(
+        st.session_state.task_memory,
+        st.session_state.data_source,
+    )
     turn_index = sum(1 for msg in st.session_state.messages if msg["role"] == "user") + 1
     turn_type = classify_user_message(
         user_input,
@@ -360,6 +455,7 @@ if user_input:
     # see which tool is being called rather than staring at a static spinner.
     with st.chat_message("assistant"):
         with st.status("Working on your question...", expanded=True) as status:
+            db_token = set_active_db_path(active_db_path)
             try:
                 response_text, response_usage = get_response(
                     user_message=user_input,
@@ -371,6 +467,7 @@ if user_input:
                     task_state=st.session_state.task_memory,
                     turn_type=turn_type,
                     use_prior_context=use_prior_context,
+                    active_db_path=str(active_db_path),
                 )
                 status.update(label="Done", state="complete", expanded=False)
             except Exception as e:
@@ -383,6 +480,8 @@ if user_input:
                     "`OPENAI_BASE_URL` (for example `https://us.api.openai.com/v1`)."
                 )
                 response_usage = None
+            finally:
+                reset_active_db_path(db_token)
 
         st.markdown(response_text)
         if response_usage is not None:

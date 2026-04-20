@@ -1,5 +1,5 @@
 """
-Unit tests for session-scoped task memory helpers.
+Unit tests for GPT-style session-memory helpers.
 """
 
 import sys
@@ -15,46 +15,59 @@ from task_memory import (
     has_active_task,
     initialize_task_memory,
     summarize_task_scope,
+    sync_memory_with_data_source,
     update_task_memory,
     update_task_memory_from_response,
 )
 
 
 def test_initialize_task_memory_starts_inactive():
-    task_state = initialize_task_memory()
-    assert task_state["memory_active"] is False
-    assert task_state["task_id"] is None
-    assert task_state["active_filters"] == {}
+    memory = initialize_task_memory()
+    assert memory["memory_active"] is False
+    assert memory["memory_summary"] is None
+    assert memory["memory_id"].startswith("mem-")
 
 
-def test_sample_question_initializes_lapsed_virginia_task():
-    task_state = update_task_memory(
+def test_greeting_does_not_activate_memory():
+    memory = update_task_memory(
+        "hello",
+        classification="new_task",
+        task_state=initialize_task_memory(),
+        turn_index=1,
+    )
+    assert has_active_task(memory) is False
+    assert memory["memory_summary"] is None
+
+
+def test_sample_question_builds_session_summary():
+    memory = update_task_memory(
         "Which lapsed donors in Virginia should we re-engage?",
         classification="new_task",
         task_state=initialize_task_memory(),
         turn_index=1,
     )
-    assert has_active_task(task_state) is True
-    assert task_state["task_type"] == "donor_prioritization"
-    assert task_state["current_segment"] == "lapsed donors"
-    assert task_state["current_geography"] == "Virginia"
-    assert "Prioritize lapsed donors in Virginia" == task_state["task_title"]
+    assert has_active_task(memory) is True
+    assert memory["task_type"] == "donor_prioritization"
+    assert memory["current_segment"] == "lapsed donors"
+    assert memory["current_geography"] == "Virginia"
+    assert "We are analyzing lapsed donors in Virginia" in memory["memory_summary"]
 
 
-def test_sample_question_initializes_trip_planning_task():
-    task_state = update_task_memory(
+def test_trip_question_initializes_broader_memory():
+    memory = update_task_memory(
         "Plan a fundraising trip to NYC: who should we meet?",
         classification="new_task",
         task_state=initialize_task_memory(),
         turn_index=1,
     )
-    assert task_state["task_type"] == "trip_planning"
-    assert task_state["current_geography"] == "NYC"
-    assert task_state["task_title"] == "Plan fundraising trip to NYC"
+    assert memory["task_type"] == "trip_planning"
+    assert memory["current_geography"] == "NYC"
+    assert memory["task_title"] == "Fundraising trip in NYC"
+    assert "planning a fundraising trip in NYC" in memory["memory_summary"]
 
 
-def test_refinement_classification_defaults_to_continuity_for_active_task():
-    active_task = update_task_memory(
+def test_refinement_classification_defaults_to_continuity_for_active_memory():
+    active_memory = update_task_memory(
         "Which lapsed donors in Virginia should we re-engage?",
         classification="new_task",
         task_state=initialize_task_memory(),
@@ -62,50 +75,51 @@ def test_refinement_classification_defaults_to_continuity_for_active_task():
     )
     turn_type = classify_user_message(
         "Only show the ones with high wealth scores",
-        task_state=active_task,
+        task_state=active_memory,
         chat_history=[{"role": "user", "content": "Which lapsed donors in Virginia should we re-engage?"}],
     )
     assert turn_type == "refinement"
 
 
 def test_refinement_keeps_scope_and_adds_filter():
-    active_task = update_task_memory(
+    active_memory = update_task_memory(
         "Which lapsed donors in Virginia should we re-engage?",
         classification="new_task",
         task_state=initialize_task_memory(),
         turn_index=1,
     )
-    refined_task = update_task_memory(
+    refined_memory = update_task_memory(
         "Only show the ones with high wealth scores",
         classification="refinement",
-        task_state=active_task,
+        task_state=active_memory,
         turn_index=2,
     )
-    assert refined_task["current_segment"] == "lapsed donors"
-    assert refined_task["current_geography"] == "Virginia"
-    assert refined_task["active_filters"]["wealth_score"] == "high wealth scores only"
+    assert refined_memory["current_segment"] == "lapsed donors"
+    assert refined_memory["current_geography"] == "Virginia"
+    assert refined_memory["active_filters"]["wealth_score"] == "high wealth scores only"
+    assert "high wealth scores only" in refined_memory["memory_summary"]
 
 
 def test_trip_refinement_preserves_geography_and_adds_recency_filter():
-    active_task = update_task_memory(
+    active_memory = update_task_memory(
         "Plan a fundraising trip to NYC: who should we meet?",
         classification="new_task",
         task_state=initialize_task_memory(),
         turn_index=1,
     )
-    refined_task = update_task_memory(
+    refined_memory = update_task_memory(
         "Narrow to people who gave in the last two years",
         classification="refinement",
-        task_state=active_task,
+        task_state=active_memory,
         turn_index=2,
     )
-    assert refined_task["task_type"] == "trip_planning"
-    assert refined_task["current_geography"] == "NYC"
-    assert refined_task["active_filters"]["recency"] == "gave in the last 2 years"
+    assert refined_memory["task_type"] == "trip_planning"
+    assert refined_memory["current_geography"] == "NYC"
+    assert refined_memory["active_filters"]["recency"] == "gave in the last 2 years"
 
 
 def test_topic_switch_detects_new_standalone_request():
-    active_task = update_task_memory(
+    active_memory = update_task_memory(
         "Which lapsed donors in Virginia should we re-engage?",
         classification="new_task",
         task_state=initialize_task_memory(),
@@ -113,51 +127,65 @@ def test_topic_switch_detects_new_standalone_request():
     )
     turn_type = classify_user_message(
         "What does our donor pipeline look like?",
-        task_state=active_task,
+        task_state=active_memory,
         chat_history=[{"role": "assistant", "content": "Here are the top lapsed donors in Virginia."}],
     )
     assert turn_type == "topic_switch"
 
 
-def test_contextual_prompt_includes_task_summary_and_prior_context_flag():
-    active_task = update_task_memory(
+def test_contextual_prompt_includes_session_summary_and_dataset():
+    active_memory = update_task_memory(
         "Which lapsed donors in Virginia should we re-engage?",
         classification="new_task",
         task_state=initialize_task_memory(),
         turn_index=1,
     )
-    active_task["last_conclusion"] = "Three Virginia lapsed donors stand out for re-engagement."
+    active_memory["last_conclusion"] = "Three Virginia lapsed donors stand out for re-engagement."
+    active_memory = sync_memory_with_data_source(
+        active_memory,
+        {"label": "Uploaded CSV dataset", "kind": "uploaded_csv"},
+    )
     prompt = build_contextual_prompt(
         message="Only show the ones with high wealth scores",
-        task_state=active_task,
+        task_state=active_memory,
         chat_history=[{"role": "user", "content": "Which lapsed donors in Virginia should we re-engage?"}],
         turn_type="refinement",
         use_prior_context=True,
     )
-    assert "Current task summary: Prioritize lapsed donors in Virginia" in prompt
+    assert "Summary: We are analyzing lapsed donors in Virginia" in prompt
+    assert "Current data source: Uploaded CSV dataset" in prompt
     assert "Using prior-turn context: yes" in prompt
-    assert "Last conclusion: Three Virginia lapsed donors stand out for re-engagement." in prompt
 
 
 def test_response_update_captures_conclusion_and_shortlist():
-    active_task = update_task_memory(
+    active_memory = update_task_memory(
         "Who are our top 3 donors?",
         classification="new_task",
         task_state=initialize_task_memory(),
         turn_index=1,
     )
-    updated_task = update_task_memory_from_response(
+    updated_memory = update_task_memory_from_response(
         "Here are the best prospects to contact next.\n\n"
         "- Jane Doe (Virginia)\n"
         "- John Smith (New York)\n"
         "- Maria Garcia (Washington, DC)",
-        task_state=active_task,
+        task_state=active_memory,
     )
-    assert updated_task["last_conclusion"] == "Here are the best prospects to contact next."
-    assert updated_task["current_shortlist"] == ["Jane Doe", "John Smith", "Maria Garcia"]
+    assert updated_memory["last_conclusion"] == "Here are the best prospects to contact next."
+    assert updated_memory["current_shortlist"] == ["Jane Doe", "John Smith", "Maria Garcia"]
+    assert "Jane Doe" in updated_memory["memory_summary"]
 
 
-def test_sidebar_context_placeholder_and_scope_summary():
-    empty_state = initialize_task_memory()
-    assert format_task_context_markdown(empty_state) == "No active task."
-    assert summarize_task_scope(empty_state) == "No active scope"
+def test_sidebar_memory_placeholder_and_scope_summary():
+    empty_memory = initialize_task_memory()
+    assert "No remembered analysis context yet." in format_task_context_markdown(empty_memory)
+    assert summarize_task_scope(empty_memory) == "No remembered analytical scope"
+
+
+def test_sync_memory_with_data_source_updates_sidebar_context():
+    memory = sync_memory_with_data_source(
+        initialize_task_memory(),
+        {"label": "Uploaded database: donors.db", "kind": "uploaded_db"},
+    )
+    assert memory["dataset_label"] == "Uploaded database: donors.db"
+    assert memory["dataset_kind"] == "uploaded_db"

@@ -1,9 +1,10 @@
 """
-Helpers for session-scoped task memory and follow-up continuity.
+Session-memory helpers for conversation continuity.
 
-The Streamlit app stores this structure in session state so each user turn can
-be classified and merged into an active analytical task without rebuilding the
-UI or chat architecture.
+This module keeps a broad, GPT-style memory of the ongoing session rather than
+tracking only one rigid task card. The app still uses lightweight classification
+and remembered analytical scope, but the visible UI focuses on a natural
+session summary, remembered context, and latest conclusions.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from typing import Any
 
 
 TASK_MEMORY_TEMPLATE = {
+    "memory_id": None,
     "task_id": None,
     "task_title": None,
     "task_type": None,
@@ -26,7 +28,13 @@ TASK_MEMORY_TEMPLATE = {
     "last_conclusion": None,
     "open_followups": [],
     "last_user_intent": None,
+    "last_turn_type": None,
     "memory_active": False,
+    "memory_summary": None,
+    "remembered_context": None,
+    "recent_topics": [],
+    "dataset_label": None,
+    "dataset_kind": "synthetic",
     "last_updated_turn": 0,
 }
 
@@ -221,6 +229,41 @@ NEW_TASK_MARKERS = (
     "separate question",
 )
 
+ANALYTICS_KEYWORDS = (
+    "donor",
+    "donors",
+    "gift",
+    "gifts",
+    "prospect",
+    "prospects",
+    "lapsed",
+    "wealth",
+    "fundraising",
+    "trip",
+    "meet",
+    "pipeline",
+    "subscriber",
+    "cultivate",
+    "re-engage",
+    "virginia",
+    "nyc",
+    "new york",
+)
+
+SMALL_TALK_MESSAGES = {
+    "hi",
+    "hello",
+    "hey",
+    "thanks",
+    "thank you",
+    "ok",
+    "okay",
+    "cool",
+    "great",
+    "sounds good",
+    "got it",
+}
+
 SHORTLIST_LINE_PATTERN = re.compile(
     r"^\s*(?:[-*]|\d+\.)\s+(?:\*\*)?([A-Z][A-Za-z'.-]+(?:\s+[A-Z][A-Za-z'.-]+){1,3})(?:\*\*)?",
     re.MULTILINE,
@@ -231,17 +274,19 @@ SHORTLIST_BOLD_PATTERN = re.compile(
 
 
 def initialize_task_memory() -> dict[str, Any]:
-    """Return a fresh task memory payload for Streamlit session state."""
-    return copy.deepcopy(TASK_MEMORY_TEMPLATE)
+    """Return a fresh session-memory payload."""
+    state = copy.deepcopy(TASK_MEMORY_TEMPLATE)
+    state["memory_id"] = _new_memory_id()
+    return state
 
 
 def reset_task_memory() -> dict[str, Any]:
-    """Reset all persisted task context."""
+    """Reset all remembered session context."""
     return initialize_task_memory()
 
 
 def coerce_task_memory(task_state: dict[str, Any] | None) -> dict[str, Any]:
-    """Normalize a stored task object so all expected keys exist."""
+    """Normalize a stored memory object so all expected keys exist."""
     normalized = initialize_task_memory()
     if not task_state:
         return normalized
@@ -255,13 +300,28 @@ def coerce_task_memory(task_state: dict[str, Any] | None) -> dict[str, Any]:
         else:
             normalized[key] = value
 
+    normalized["memory_id"] = task_state.get("memory_id") or normalized["memory_id"]
     return normalized
 
 
-def has_active_task(task_state: dict[str, Any] | None) -> bool:
-    """Check whether there is an active reusable task in session state."""
+def sync_memory_with_data_source(
+    task_state: dict[str, Any] | None,
+    data_source: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Attach the active data-source metadata to the memory object."""
     state = coerce_task_memory(task_state)
-    return bool(state["memory_active"] and state["task_id"])
+    if not data_source:
+        return state
+
+    state["dataset_label"] = data_source.get("label")
+    state["dataset_kind"] = data_source.get("kind", "synthetic")
+    return state
+
+
+def has_active_task(task_state: dict[str, Any] | None) -> bool:
+    """Check whether there is meaningful remembered analytical context."""
+    state = coerce_task_memory(task_state)
+    return bool(state["memory_active"] and state["memory_summary"])
 
 
 def classify_user_message(
@@ -270,7 +330,7 @@ def classify_user_message(
     chat_history: list[dict] | None,
     is_sample_question: bool = False,
 ) -> str:
-    """Classify the current user message before the model call."""
+    """Classify the current message before the model call."""
     state = coerce_task_memory(task_state)
     msg_lower = message.strip().lower()
     inferred = infer_task_attributes(message)
@@ -278,11 +338,11 @@ def classify_user_message(
     if is_sample_question:
         return "topic_switch" if has_active_task(state) else "new_task"
 
-    if not has_active_task(state):
-        return "new_task"
-
     if any(marker in msg_lower for marker in NEW_TASK_MARKERS):
         return "topic_switch"
+
+    if not has_active_task(state):
+        return "new_task"
 
     if _looks_like_topic_switch(msg_lower, inferred, state):
         return "topic_switch"
@@ -314,14 +374,30 @@ def update_task_memory(
     task_state: dict[str, Any] | None,
     turn_index: int,
 ) -> dict[str, Any]:
-    """Merge the new user message into structured task memory."""
+    """Merge the new user turn into broader session memory."""
     state = coerce_task_memory(task_state)
+    previous_dataset = {
+        "label": state.get("dataset_label"),
+        "kind": state.get("dataset_kind", "synthetic"),
+    }
     inferred = infer_task_attributes(message)
+    meaningful = is_meaningful_analytics_message(message)
     starts_new_task = classification in {"new_task", "topic_switch"} or not has_active_task(state)
 
-    if starts_new_task:
+    state["last_user_intent"] = classification
+    state["last_turn_type"] = classification
+    state["last_updated_turn"] = turn_index
+
+    if not meaningful and not has_active_task(state):
+        state["memory_active"] = False
+        state["status"] = "idle"
+        state["memory_summary"] = None
+        state["remembered_context"] = None
+        return sync_memory_with_data_source(state, previous_dataset)
+
+    if starts_new_task and meaningful:
         state = initialize_task_memory()
-        state["task_id"] = _new_task_id()
+        state["task_id"] = _new_memory_id().replace("mem", "task", 1)
         state["task_type"] = inferred["task_type"] or "donor_analysis"
         state["current_segment"] = inferred["current_segment"]
         state["current_geography"] = inferred["current_geography"]
@@ -329,7 +405,8 @@ def update_task_memory(
         state["current_shortlist"] = []
         state["last_conclusion"] = None
         state["open_followups"] = []
-    else:
+        state["recent_topics"] = []
+    elif meaningful:
         if inferred["task_type"] and inferred["task_type"] != "donor_analysis":
             state["task_type"] = inferred["task_type"]
         if inferred["current_segment"]:
@@ -339,19 +416,26 @@ def update_task_memory(
         if inferred["active_filters"]:
             state["active_filters"].update(inferred["active_filters"])
 
-    state["task_title"] = build_task_title(state, message)
-    state["status"] = "active"
+    if meaningful:
+        state["task_title"] = build_task_title(state, message)
+        state["status"] = "active"
+        state["memory_active"] = True
+        if state["task_title"] and state["task_title"] not in state["recent_topics"]:
+            state["recent_topics"] = (state["recent_topics"] + [state["task_title"]])[-5:]
+        state["remembered_context"] = summarize_remembered_context(state)
+        state["memory_summary"] = build_memory_summary(state)
+
     state["last_user_intent"] = classification
-    state["memory_active"] = True
+    state["last_turn_type"] = classification
     state["last_updated_turn"] = turn_index
-    return state
+    return sync_memory_with_data_source(state, previous_dataset)
 
 
 def update_task_memory_from_response(
     response_text: str,
     task_state: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Persist concise conclusions and any shortlist names from the assistant."""
+    """Persist concise conclusions and shortlist details from the assistant."""
     state = coerce_task_memory(task_state)
     if not has_active_task(state):
         return state
@@ -364,11 +448,13 @@ def update_task_memory_from_response(
     if shortlist:
         state["current_shortlist"] = shortlist
 
+    state["remembered_context"] = summarize_remembered_context(state)
+    state["memory_summary"] = build_memory_summary(state)
     return state
 
 
 def infer_task_attributes(message: str) -> dict[str, Any]:
-    """Infer task metadata from a user message or sample question."""
+    """Infer reusable analytical attributes from the message."""
     task_type = infer_task_type(message)
     current_segment = infer_segment(message)
     current_geography = infer_geography(message)
@@ -383,7 +469,7 @@ def infer_task_attributes(message: str) -> dict[str, Any]:
 
 
 def infer_task_type(message: str) -> str:
-    """Guess the active task type from the user's wording."""
+    """Guess the primary analytical mode from the user's wording."""
     msg_lower = message.strip().lower()
 
     if any(term in msg_lower for term in ("trip", "meet", "visit", "travel")):
@@ -398,7 +484,10 @@ def infer_task_type(message: str) -> str:
     if "prospect" in msg_lower or "never donated" in msg_lower or "subscriber" in msg_lower:
         return "prospecting"
 
-    if any(term in msg_lower for term in ("lapsed", "re-engage", "cultivate", "top donor", "top 10", "shortlist", "prioritize")):
+    if any(
+        term in msg_lower
+        for term in ("lapsed", "re-engage", "cultivate", "top donor", "top 10", "shortlist", "prioritize")
+    ):
         return "donor_prioritization"
 
     return "donor_analysis"
@@ -447,7 +536,7 @@ def infer_geography(message: str) -> str | None:
 
 
 def infer_active_filters(message: str) -> dict[str, str]:
-    """Extract human-readable filters that should persist across follow-ups."""
+    """Extract human-readable filters that should persist across turns."""
     msg_lower = message.lower()
     filters: dict[str, str] = {}
 
@@ -486,24 +575,45 @@ def infer_active_filters(message: str) -> dict[str, str]:
     return filters
 
 
+def is_meaningful_analytics_message(message: str) -> bool:
+    """Check whether a message should activate or update analytical memory."""
+    cleaned = " ".join(message.strip().lower().split())
+    if not cleaned:
+        return False
+
+    if cleaned in SMALL_TALK_MESSAGES:
+        return False
+
+    if any(keyword in cleaned for keyword in ANALYTICS_KEYWORDS):
+        return True
+
+    if infer_geography(message) or infer_segment(message) or infer_active_filters(message):
+        return True
+
+    if "?" in message and len(cleaned.split()) >= 4:
+        return True
+
+    return len(cleaned.split()) >= 5
+
+
 def build_task_title(task_state: dict[str, Any] | None, fallback_message: str) -> str:
-    """Create a concise human-readable task title."""
+    """Create a concise label for the current analytical focus."""
     state = coerce_task_memory(task_state)
     task_type = state.get("task_type") or "donor_analysis"
     segment = state.get("current_segment")
     geography = state.get("current_geography")
 
     if task_type == "trip_planning":
-        return f"Plan fundraising trip to {geography}" if geography else "Plan fundraising trip"
+        return f"Fundraising trip in {geography}" if geography else "Fundraising trip planning"
 
     if task_type == "donor_prioritization":
         if segment and geography:
-            return f"Prioritize {segment} in {geography}"
+            return f"{segment.title()} in {geography}"
         if segment:
-            return f"Prioritize {segment}"
+            return segment.title()
 
     if task_type == "prospecting":
-        return f"Prospecting in {geography}" if geography else "Prospect identification"
+        return f"Prospects in {geography}" if geography else "Prospect identification"
 
     if task_type == "portfolio_overview":
         return "Donor pipeline overview"
@@ -512,22 +622,19 @@ def build_task_title(task_state: dict[str, Any] | None, fallback_message: str) -
         return "Fundraising strategy guidance"
 
     cleaned = " ".join(fallback_message.strip().split())
-    return cleaned[:80] if cleaned else "Active donor analysis"
+    return cleaned[:80] if cleaned else "Donor analysis"
 
 
 def summarize_filters(active_filters: dict[str, str] | None) -> str:
-    """Convert persisted filters into a compact display string."""
+    """Convert remembered filters into a compact string."""
     if not active_filters:
         return "None"
     return ", ".join(active_filters.values())
 
 
-def summarize_task_scope(task_state: dict[str, Any] | None) -> str:
-    """Summarize the active segment, geography, and filters for the UI."""
+def summarize_remembered_context(task_state: dict[str, Any] | None) -> str:
+    """Create a readable one-line summary of remembered scope."""
     state = coerce_task_memory(task_state)
-    if not has_active_task(state):
-        return "No active scope"
-
     parts = []
     if state["current_segment"]:
         parts.append(state["current_segment"])
@@ -536,26 +643,72 @@ def summarize_task_scope(task_state: dict[str, Any] | None) -> str:
     if state["active_filters"]:
         parts.append(f"filters: {summarize_filters(state['active_filters'])}")
 
-    return " | ".join(parts) if parts else state["task_title"] or "Active donor analysis"
+    if not parts:
+        return "No remembered analytical scope yet."
+    return " | ".join(parts)
+
+
+def build_memory_summary(task_state: dict[str, Any] | None) -> str | None:
+    """Build the broader GPT-style session summary."""
+    state = coerce_task_memory(task_state)
+    if not state["memory_active"]:
+        return None
+
+    if state["task_type"] == "trip_planning":
+        summary = "We are planning a fundraising trip"
+        if state["current_geography"]:
+            summary += f" in {state['current_geography']}"
+    elif state["task_type"] == "strategy_guidance":
+        summary = "We are discussing fundraising strategy"
+    elif state["task_type"] == "portfolio_overview":
+        summary = "We are reviewing the broader donor pipeline"
+    elif state["current_segment"]:
+        summary = f"We are analyzing {state['current_segment']}"
+        if state["current_geography"]:
+            summary += f" in {state['current_geography']}"
+    else:
+        summary = "We are working through donor analysis in this session"
+
+    if state["active_filters"]:
+        summary += f", with filters for {summarize_filters(state['active_filters'])}"
+
+    if state["current_shortlist"]:
+        summary += f". Current shortlist: {', '.join(state['current_shortlist'][:3])}"
+
+    return summary
+
+
+def summarize_task_scope(task_state: dict[str, Any] | None) -> str:
+    """Backward-compatible summary used by the app when needed."""
+    state = coerce_task_memory(task_state)
+    if not has_active_task(state):
+        return "No remembered analytical scope"
+    return state["memory_summary"] or summarize_remembered_context(state)
 
 
 def format_task_context_markdown(task_state: dict[str, Any] | None) -> str:
-    """Render the sidebar current-task block as markdown."""
+    """Render the sidebar memory block as concise markdown."""
     state = coerce_task_memory(task_state)
     if not has_active_task(state):
-        return "No active task."
+        return (
+            "No remembered analysis context yet.\n\n"
+            "Ask a donor question or upload data to start building session memory."
+        )
 
+    shortlist = ", ".join(state["current_shortlist"][:5]) if state["current_shortlist"] else "None yet"
     last_conclusion = state["last_conclusion"] or "None yet"
     if len(last_conclusion) > 220:
         last_conclusion = last_conclusion[:217].rstrip() + "..."
 
+    recent_topics = ", ".join(state["recent_topics"][-3:]) if state["recent_topics"] else "None yet"
+
     return (
-        f"- Current task: {state['task_title'] or 'Untitled task'}\n"
-        f"- Task type: {state['task_type'] or 'Unknown'}\n"
-        f"- Current segment: {state['current_segment'] or 'Not set'}\n"
-        f"- Geography: {state['current_geography'] or 'Not set'}\n"
-        f"- Active filters: {summarize_filters(state['active_filters'])}\n"
+        f"**Summary:** {state['memory_summary'] or 'Session memory is active.'}\n\n"
+        f"- Remembered context: {state['remembered_context'] or 'None yet'}\n"
+        f"- Recent topics: {recent_topics}\n"
+        f"- Current shortlist: {shortlist}\n"
         f"- Last conclusion: {last_conclusion}\n"
+        f"- Data source: {state.get('dataset_label') or 'Demo dataset'}\n"
         f"- Memory status: {'Active' if state['memory_active'] else 'Inactive'}\n"
     )
 
@@ -567,29 +720,29 @@ def build_contextual_prompt(
     turn_type: str | None,
     use_prior_context: bool,
 ) -> str:
-    """Wrap the raw user message with the current task summary for the LLM."""
+    """Wrap the raw user message with broader session memory for the LLM."""
     state = coerce_task_memory(task_state)
     if not has_active_task(state):
         return message
 
     shortlist = ", ".join(state["current_shortlist"]) if state["current_shortlist"] else "None yet"
+    recent_topics = ", ".join(state["recent_topics"][-3:]) if state["recent_topics"] else "None yet"
     prior_turns = sum(1 for msg in (chat_history or []) if msg.get("role") == "user")
     transition_guidance = (
-        "Treat this as a fresh task and do not carry forward older scope unless the user explicitly asks for it."
+        "Treat this as a fresh analytical thread and only reuse prior context if it is explicitly relevant."
         if turn_type in {"new_task", "topic_switch"}
-        else "Continue the active task and reuse prior geography, segment, and filters unless the user overrides them."
+        else "Continue naturally from prior turns and reuse remembered context unless the user overrides it."
     )
 
     lines = [
-        "Session task context:",
-        f"- Current task summary: {state['task_title'] or 'Active donor analysis'}",
-        f"- Task type: {state['task_type'] or 'donor_analysis'}",
-        f"- Current segment: {state['current_segment'] or 'Not set'}",
-        f"- Geography: {state['current_geography'] or 'Not set'}",
-        f"- Active filters: {summarize_filters(state['active_filters'])}",
+        "Session memory:",
+        f"- Summary: {state['memory_summary'] or 'No remembered summary'}",
+        f"- Remembered context: {state['remembered_context'] or 'None yet'}",
+        f"- Recent topics: {recent_topics}",
         f"- Current shortlist: {shortlist}",
         f"- Last conclusion: {state['last_conclusion'] or 'None yet'}",
-        f"- Turn classification: {turn_type or state['last_user_intent'] or 'new_task'}",
+        f"- Current data source: {state.get('dataset_label') or 'Demo dataset'}",
+        f"- Turn classification: {turn_type or state['last_turn_type'] or 'new_task'}",
         f"- Using prior-turn context: {'yes' if use_prior_context else 'no'}",
         f"- Prior user turns in session: {prior_turns}",
         f"- Guidance: {transition_guidance}",
@@ -612,7 +765,7 @@ def summarize_response_text(response_text: str) -> str | None:
 
 
 def extract_shortlist(response_text: str) -> list[str]:
-    """Try to extract donor names from bullet lists in the assistant response."""
+    """Try to extract names from bullet lists in the assistant response."""
     matches = SHORTLIST_LINE_PATTERN.findall(response_text)
     matches.extend(SHORTLIST_BOLD_PATTERN.findall(response_text))
 
@@ -634,7 +787,7 @@ def _looks_like_topic_switch(
     inferred: dict[str, Any],
     task_state: dict[str, Any],
 ) -> bool:
-    """Heuristic for detecting when the user is clearly starting a new task."""
+    """Heuristic for detecting a clear topic switch."""
     current_type = task_state.get("task_type")
     new_type = inferred.get("task_type")
 
@@ -663,9 +816,9 @@ def _looks_like_topic_switch(
     return msg_lower.startswith(standalone_starts) or msg_lower.endswith("?")
 
 
-def _new_task_id() -> str:
-    """Generate a short readable task identifier for the sidebar."""
-    return f"task-{uuid.uuid4().hex[:8]}"
+def _new_memory_id() -> str:
+    """Generate a short readable memory identifier."""
+    return f"mem-{uuid.uuid4().hex[:8]}"
 
 
 def _strip_markdown(text: str) -> str:

@@ -226,7 +226,6 @@ RESPONSE_CACHE_FINGERPRINT_PATHS = (
     Path(__file__),
     Path(__file__).with_name("prompts.py"),
     Path(__file__).with_name("queries.py"),
-    Path(__file__).parent.parent / "data" / "donors.db",
 )
 
 
@@ -244,10 +243,16 @@ def execute_tool(tool_name: str, tool_input: dict) -> str:
         return json.dumps({"error": f"Tool execution failed: {exc}"})
 
 
-def _response_cache_fingerprint() -> list[dict]:
+def _response_cache_fingerprint(active_db_path: str | None = None) -> list[dict]:
     """Capture the parts of local state that should invalidate cached answers."""
     fingerprint: list[dict] = []
-    for path in RESPONSE_CACHE_FINGERPRINT_PATHS:
+    fingerprint_paths = list(RESPONSE_CACHE_FINGERPRINT_PATHS)
+    if active_db_path:
+        fingerprint_paths.append(Path(active_db_path))
+    else:
+        fingerprint_paths.append(Path(__file__).parent.parent / "data" / "donors.db")
+
+    for path in fingerprint_paths:
         if path.exists():
             stat = path.stat()
             fingerprint.append(
@@ -273,6 +278,7 @@ def _build_response_cache_key(
     system_prompt,
     user_message: str,
     conversation_history: list[dict],
+    active_db_path: str | None = None,
 ) -> str:
     """Hash the effective request so identical inputs can reuse exact answers."""
     payload = {
@@ -283,7 +289,8 @@ def _build_response_cache_key(
         "user_message": user_message.strip(),
         "conversation_history": conversation_history,
         "current_date": datetime.now().date().isoformat(),
-        "fingerprint": _response_cache_fingerprint(),
+        "active_db_path": active_db_path,
+        "fingerprint": _response_cache_fingerprint(active_db_path),
     }
     payload_json = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
@@ -417,6 +424,7 @@ def _get_claude_response(
     task_state: Optional[dict],
     turn_type: Optional[str],
     use_prior_context: bool,
+    active_db_path: Optional[str],
 ) -> tuple[str, ResponseUsage]:
     if anthropic is None:
         raise RuntimeError(
@@ -448,6 +456,7 @@ def _get_claude_response(
         system_prompt=system_prompt,
         user_message=effective_user_message,
         conversation_history=conversation_history,
+        active_db_path=active_db_path,
     )
     tool_call_count = 0
 
@@ -547,6 +556,7 @@ def _get_openai_response(
     task_state: Optional[dict],
     turn_type: Optional[str],
     use_prior_context: bool,
+    active_db_path: Optional[str],
 ) -> tuple[str, ResponseUsage]:
     if OpenAI is None:
         raise RuntimeError(
@@ -580,6 +590,7 @@ def _get_openai_response(
         system_prompt=system_prompt,
         user_message=effective_user_message,
         conversation_history=conversation_history,
+        active_db_path=active_db_path,
     )
     tool_call_count = 0
     openai_tools = _openai_tools()
@@ -686,6 +697,7 @@ def get_response(
     task_state: Optional[dict] = None,
     turn_type: Optional[str] = None,
     use_prior_context: bool = False,
+    active_db_path: Optional[str] = None,
 ) -> tuple[str, ResponseUsage]:
     """Send a user message through the full tool-use loop."""
     provider = _provider_for_model(model)
@@ -700,6 +712,7 @@ def get_response(
             task_state=task_state,
             turn_type=turn_type,
             use_prior_context=use_prior_context,
+            active_db_path=active_db_path,
         )
     return _get_claude_response(
         user_message=user_message,
@@ -711,4 +724,5 @@ def get_response(
         task_state=task_state,
         turn_type=turn_type,
         use_prior_context=use_prior_context,
+        active_db_path=active_db_path,
     )
