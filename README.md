@@ -244,7 +244,7 @@ Using Haiku instead of Sonnet reduces costs by roughly 75-80% at the expense of 
 
 ## Known limitations
 
-- **Mock data only.** The 300-record database is synthetic. Real Salesforce, MailChimp, and WealthEngine integration is out of scope for this prototype.
+- **Mock data only.** The 10000-record database is synthetic. Real Salesforce, MailChimp, and WealthEngine integration is out of scope for this prototype.
 - **No authentication.** The Streamlit app has no login screen. Do not deploy it publicly with real donor data.
 - **No data export.** Query results are displayed in the chat; there is no CSV download or report generation.
 - **Wealth scores are estimates.** The mock wealth scores (1-10) approximate WealthEngine output. Real scores would come from the WealthEngine API.
