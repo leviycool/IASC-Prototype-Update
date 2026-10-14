@@ -482,7 +482,6 @@ def _get_claude_response(
                 response = client.messages.create(
                     model=model,
                     max_tokens=4096,
-                    temperature=LLM_TEMPERATURE,
                     system=system_prompt,
                     tools=TOOLS,
                     messages=messages,
